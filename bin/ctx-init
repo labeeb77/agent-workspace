@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# ctx-init — make AGENTS.md the single project instruction file for every harness.
+#   Codex reads AGENTS.md; CLAUDE.md just contains `@AGENTS.md` (Claude Code's import syntax).
+#
+# usage: ctx-init             create what is missing, never overwrite
+#        ctx-init --migrate   an existing CLAUDE.md becomes AGENTS.md; CLAUDE.md then imports it
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+name=$(basename "$PWD")
+imp='@AGENTS.md'
+
+detect() {  # prints "stack|install|check|run"
+  local pm=npm
+  [[ -f pnpm-lock.yaml ]] && pm=pnpm; [[ -f yarn.lock ]] && pm=yarn; [[ -f bun.lockb || -f bun.lock ]] && pm=bun
+  if [[ -f pubspec.yaml ]]; then echo "Flutter / Dart|flutter pub get|flutter analyze && flutter test|flutter run"
+  elif [[ -f package.json ]]; then
+    local scripts check=() s
+    scripts=$(jq -r '.scripts // {} | keys[]' package.json 2>/dev/null || true)
+    for s in lint typecheck type-check test; do grep -qx "$s" <<<"$scripts" && check+=("$pm run $s"); done
+    local deps; deps=$(jq -r '(.dependencies // {}) + (.devDependencies // {}) | keys[]' package.json 2>/dev/null || true)
+    local fw="Node.js"
+    for f in next react vue svelte @angular/core express @nestjs/core; do grep -qx "$f" <<<"$deps" && fw+=", $f"; done
+    local joined=TODO
+    if ((${#check[@]})); then joined=$(printf '%s && ' "${check[@]}"); joined=${joined% && }; fi
+    echo "$fw ($pm)|$pm install|$joined|$pm run dev"
+  elif [[ -f go.mod ]]; then echo "Go|go mod download|go vet ./... && go test ./...|go run ."
+  elif [[ -f manage.py ]]; then echo "Python / Django|uv sync|python manage.py test|python manage.py runserver"
+  elif [[ -f pyproject.toml ]]; then echo "Python|uv sync|uv run pytest|TODO"
+  elif compgen -G "*.sln" >/dev/null || compgen -G "*.csproj" >/dev/null; then echo ".NET|dotnet restore|dotnet build && dotnet test|dotnet run"
+  elif [[ -f Cargo.toml ]]; then echo "Rust|cargo fetch|cargo clippy && cargo test|cargo run"
+  else echo "TODO|TODO|TODO|TODO"; fi
+}
+
+if [[ -f AGENTS.md ]]; then
+  echo "ok      AGENTS.md exists"
+elif [[ -f CLAUDE.md ]]; then
+  if [[ ${1:-} == --migrate ]]; then
+    mv CLAUDE.md AGENTS.md && printf '%s\n' "$imp" > CLAUDE.md
+    echo "moved   CLAUDE.md -> AGENTS.md; CLAUDE.md now imports it"
+  else
+    echo "WARN    CLAUDE.md exists but AGENTS.md does not, so Codex can't see these rules."
+    echo "        Run 'ctx-init --migrate' to move them into AGENTS.md."
+    exit 1
+  fi
+else
+  IFS='|' read -r stack install check run < <(detect)
+  cat > AGENTS.md <<EOF
+# $name
+
+<!-- Instructions for every coding agent. Codex reads this file; CLAUDE.md imports it.
+     Keep it under ~100 lines: it is loaded into every session. -->
+
+## Stack
+- $stack
+
+## Commands
+- Install: \`$install\`
+- Check (lint + typecheck + tests, used by orch): \`$check\`
+- Run: \`$run\`
+
+## Architecture
+TODO: main folders and what lives where.
+
+## Conventions
+TODO: naming, state management, API style, error handling, styling/design tokens.
+
+## Rules
+- TODO: things agents must never do in this repo (e.g. edit generated files, touch migrations without asking).
+EOF
+  echo "created AGENTS.md ($stack)"
+  echo "        Next: ask your agent \"Fill in the TODOs in AGENTS.md from the repo; keep it under 100 lines.\""
+fi
+
+if [[ ! -f CLAUDE.md ]]; then
+  printf '%s\n' "$imp" > CLAUDE.md && echo "created CLAUDE.md (imports AGENTS.md)"
+elif grep -qxF "$imp" CLAUDE.md; then
+  echo "ok      CLAUDE.md imports AGENTS.md"
+else
+  echo "WARN    CLAUDE.md does not import AGENTS.md; add a line '$imp' to it (keep Claude-only notes below)."
+fi
+
+"$(dirname "$(readlink -f "$0")")/skills-link" --project

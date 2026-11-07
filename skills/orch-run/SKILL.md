@@ -3,7 +3,7 @@ name: orch-run
 description: Orchestrator step 2 for a Herdr multi-agent team. Use when the user says "orch-run", "continue the plan", or answers open questions. Runs or resumes .orchestrate/plan.md as an event-driven scheduler — parallel Claude/Codex coders (worktrees or shared), dependency order, checks, reviewer, merges.
 ---
 
-You are the LEAD (OpenCode or Amp). Load the `herdr` skill for CLI syntax. All bookkeeping goes through `orch` (`~/.local/bin/orch` — use the full path if `orch` is not on PATH). Trust its output over your memory: it owns task states, who is free, sentinel files, branches and merges.
+You are the LEAD (Claude Code, Codex, OpenCode or Amp). Load the `herdr` skill for CLI syntax. All bookkeeping goes through `orch` (`~/.local/bin/orch` — use the full path if `orch` is not on PATH). Trust its output over your memory: it owns task states, who is free, sentinel files, branches and merges.
 Extra user input = whatever the user wrote alongside invoking this skill (answers, overrides, or nothing).
 
 ## Two ways to drive a run — pick one per run
@@ -27,6 +27,7 @@ Extra user input = whatever the user wrote alongside invoking this skill (answer
 - Never print whole files or logs into the conversation: check output → `<check cmd> 2>&1 | tail -40`; reports → read the report file only (workers keep it ≤ 20 lines); never open `diff.patch` yourself — that is the reviewer's job.
 - Poll with the longest wait your shell tool allows: `orch poll 540` when you can give the command a 10-minute timeout, otherwise `orch poll 100`. Each poll is a full turn of yours, so fewer, longer polls cost far less.
 - Don't narrate between polls; one short status line every few events is enough.
+- Switching harness: if YOU are near your own usage limit, write `.orchestrate/handoff-notes.md` (handoff skill) and run `orch handoff`; the developer starts the other harness as lead and invokes orch-run — everything else is already on disk.
 - Fresh session rule: after each MERGED event (or whenever your context is past ~50%), if nothing is mid-step, say "Checkpoint: safe to restart — start a new session and invoke orch-run". Everything needed to resume is on disk.
 
 ## 0. Resume
@@ -66,6 +67,7 @@ Extra user input = whatever the user wrote alongside invoking this skill (answer
 - **Pass**: if the task has `Review: yes`, run `orch review Mn` (BUSY means it's queued). Otherwise go to **E. Land**.
 
 **E. Land**
+- Run `orch gate Mn` first. `NEEDS_APPROVAL` (exit 3) means the task has `Approve: yes`: tell the developer in one or two lines what to look at (the task's DIR and its report) and that they answer with `orch approve Mn` or `orch reject Mn "<why>"`. Keep the other tasks running. A task whose status turns `approved` is landed with the steps below; a rejected one comes back `paused`.
 - Run `orch commit Mn`. In shared mode this already lands the task.
 - Worktree mode: run `orch merge Mn`.
   - `MERGED`: dependents may now be READY.
@@ -81,4 +83,4 @@ Extra user input = whatever the user wrote alongside invoking this skill (answer
   1. Run the check command on the integration branch.
   2. Finish `.orchestrate/summary.md` with these sections: Feature summary; Commits (`git log --oneline <base>..HEAD`); Files changed (`git diff --stat <base>..HEAD`); Which agent did what; Design decisions & study notes for the developer; Reviewer suggestions not applied; a Manual verification checklist (`- [ ]` per user-facing behaviour).
   3. Worktree mode: run `orch cleanup` to remove the clean worktrees. Task branches are kept.
-  4. Tell the developer: "All tasks merged on <branch>. Review .orchestrate/summary.md, test the checklist, then merge <branch> into <base> or ask for changes."
+  4. Tell the developer: "All tasks merged on <branch>. Review .orchestrate/summary.md and test the checklist. When you're happy, `orch pr` pushes <branch> and opens a PR into <base> (it asks first); `orch ci --watch` follows its checks." Never push or open the PR yourself unless the developer asks.

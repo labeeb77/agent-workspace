@@ -1,9 +1,9 @@
 ---
 name: orch-plan
-description: Orchestrator step 1 for a Herdr multi-agent team (OpenCode or Amp as lead; Claude/Codex coders; optional reviewer). Use when the user asks to plan or orchestrate a feature, or says "orch-plan". Preflight, discover agents, choose worktree or shared mode, baseline checks, write a dependency-aware task plan. Does NOT execute.
+description: Orchestrator step 1 for a Herdr multi-agent team (any harness as lead — Claude Code, Codex, OpenCode, Amp; Claude/Codex coders; optional reviewer). Use when the user asks to plan or orchestrate a feature, or says "orch-plan". Preflight, discover agents, choose worktree or shared mode, baseline checks, write a dependency-aware task plan. Does NOT execute.
 ---
 
-You are the LEAD of a Herdr agent team. You may be OpenCode or Amp; the rules are identical.
+You are the LEAD of a Herdr agent team. You may be Claude Code, Codex, OpenCode or Amp; the rules are identical.
 Load the `herdr` skill for exact CLI syntax. The state helper is `orch` (installed at `~/.local/bin/orch`; if `orch` is not on PATH call it by that full path; run it with no args for usage).
 In this skill you ONLY plan. You do not prompt workers and you never edit application code.
 
@@ -12,11 +12,11 @@ Feature request = the user's message that invoked this skill.
 ## 1. Preflight (stop and report if any check fails)
 - `echo $HERDR_ENV` prints `1`. If not, tell the user to start you from a Herdr pane, then stop.
 - Inside a git repo, and `git status --porcelain` is empty. If not, ask the user to commit or stash first.
-- `mkdir -p .orchestrate`.
+- `mkdir -p .orchestrate`, then save the feature request verbatim (plus the developer's answers as you get them) to `.orchestrate/requirement.md`. `orch handoff` puts it in front of any agent that takes over later.
 
 ## 2. Discover the team
 - Run `herdr agent list` and `herdr pane current`. The current pane is YOU. Never prompt it.
-- **Coders** = every claude and codex pane. Also count opencode or amp panes that are not you, if the user wants them coding. Name them `claude-1`, `claude-2`, `codex-1`… with `herdr agent rename` and always target them by name. Names stay stable; pane IDs can change when panes close.
+- **Coders** = every claude and codex pane that is not you. Also count opencode, amp or gemini panes that are not you, if the user wants them coding. Name them `claude-1`, `claude-2`, `codex-1`… with `herdr agent rename` and always target them by name. Names stay stable; pane IDs can change when panes close.
 - **Reviewer** = AGY, or one spare agent the user picks. Name it `reviewer`. If there is none, use `Reviewer: none`.
 - If it's unclear which pane should play which role, ask the user.
 
@@ -58,6 +58,7 @@ Reviewer: reviewer (agy) | none
 Depends on: none
 Prefer: any | claude | codex
 Review: yes | no
+Approve: yes | no
 Likely files: src/a.ts, src/b.ts
 Goal: <one sentence>
 Scope:
@@ -78,10 +79,11 @@ How to split the work into tasks:
 - **List realistic Likely files.** `orch sync` warns when two parallel tasks touch the same file. Then either add a dependency or accept a likely merge conflict.
 - **Prefer**: `claude` for UI and refactors, `codex` for focused backend or test work, otherwise `any`. This is a preference, not a lock: if the preferred agent is busy or rate-limited, the other one takes the task.
 - **Review**: `yes` for UI, API contracts, auth, payments and schema changes.
+- **Approve**: `yes` for database migrations, destructive data changes, auth/permissions, payments, deleting features, or anything the developer flagged. Such a task stops after checks and review until the developer runs `orch approve Mn` (or `orch reject Mn "<why>"`). Leave routine work at `no` — don't add gates the developer has to click through for nothing.
 - **ZERO GUESSWORK**: missing business rules, undefined data shapes, and auth or security tradeoffs go under "Open questions" with 2–3 concrete options. `orch sync` marks such tasks `needs-answer`, and anything depending on them waits.
 
 ## 6. Validate and hand back
 - Run `orch sync`. Fix every ERROR (unknown dependency, cycle, bad header) and re-run. Report every WARN to the user.
 - Run `orch status` and show the user the table, the parallel shape (which tasks run together), and all open questions.
-- Then say: "Plan written to .orchestrate/plan.md. Edit it: untick `[x]` to skip a task, change `Depends on`/`Prefer`, answer open questions under 'Notes from user' and set 'Open questions: - none', add global instructions. Then either run `orch autopilot` in a terminal (cheapest: no AI in the loop), or run orch-run to let me drive (OpenCode: `/orch-run`; Amp: "use the orch-run skill")."
+- Then say: "Plan written to .orchestrate/plan.md. Edit it: untick `[x]` to skip a task, change `Depends on`/`Prefer`, answer open questions under 'Notes from user' and set 'Open questions: - none', add global instructions. Then either run `orch autopilot` in a terminal (cheapest: no AI in the loop), or run orch-run to let me drive (Claude Code / OpenCode: `/orch-run`; Codex: `$orch-run`; Amp: "use the orch-run skill"). Follow progress with `orch board --watch` in a side pane."
 - STOP.

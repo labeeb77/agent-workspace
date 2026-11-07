@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# skills-link — one canonical skills folder for every harness.
+#   ~/.agents/skills is canonical (Codex reads it natively); Claude Code reads ~/.claude/skills,
+#   so each skill gets a relative symlink there.
+#
+# usage: skills-link             link global skills into ~/.claude/skills
+#        skills-link --project   in the current repo: make .claude/skills a symlink to .agents/skills
+set -euo pipefail
+
+if [[ ${1:-} == --project ]]; then
+  cd "$(git rev-parse --show-toplevel)"
+  mkdir -p .agents/skills
+  if [[ -L .claude/skills ]]; then
+    echo "ok     .claude/skills -> $(readlink .claude/skills)"
+  elif [[ -d .claude/skills ]]; then
+    for d in .claude/skills/*/; do
+      [[ -d $d ]] || continue
+      n=$(basename "$d")
+      if [[ -e .agents/skills/$n ]]; then echo "SKIP   $n: exists in both .claude/skills and .agents/skills"
+      else mv "$d" .agents/skills/ && echo "moved  $n -> .agents/skills/"; fi
+    done
+    if rmdir .claude/skills 2>/dev/null; then
+      ln -s ../.agents/skills .claude/skills && echo "linked .claude/skills -> ../.agents/skills"
+    else
+      echo "WARN   .claude/skills still has files; left it as is"
+    fi
+  else
+    mkdir -p .claude && ln -s ../.agents/skills .claude/skills && echo "linked .claude/skills -> ../.agents/skills"
+  fi
+  exit 0
+fi
+
+src=$HOME/.agents/skills dst=$HOME/.claude/skills
+mkdir -p "$src" "$dst"
+for d in "$src"/*/; do
+  [[ -d $d ]] || continue
+  n=$(basename "$d")
+  if [[ -L $dst/$n ]]; then continue
+  elif [[ -e $dst/$n ]]; then echo "SKIP   $n: $dst/$n is a real directory (move it into $src to share it)"
+  else ln -s "../../.agents/skills/$n" "$dst/$n" && echo "linked $n"; fi
+done
+for l in "$dst"/*; do
+  if [[ -L $l && ! -e $l ]]; then rm "$l" && echo "removed dangling link $(basename "$l")"; fi
+done

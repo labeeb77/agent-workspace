@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# ws — pick a project and open it as a Herdr workspace: lead agent on the left, live orch board on the right.
+#
+# usage: ws [filter] [--lead claude|codex|opencode]
+#   DEV_ROOTS  space-separated folders to search for git repos (default: ~/dev)
+#   DEV_LEAD   default lead harness (default: claude)
+set -euo pipefail
+lead=${DEV_LEAD:-claude} q=""
+while (($#)); do
+  case $1 in
+    --lead) lead=$2; shift 2 ;;
+    -h|--help) sed -n '2,7p' "$0"; exit 0 ;;
+    *) q=$1; shift ;;
+  esac
+done
+
+read -ra roots <<<"${DEV_ROOTS:-$HOME/dev}"
+dir=$(find "${roots[@]}" -maxdepth 5 \( -name node_modules -o -name '*-wt' -o -name build \) -prune -o \
+        -name .git -type d -printf '%h\n' 2>/dev/null | sort |
+      sed "s|^$HOME/|~/|" |
+      fzf --query "$q" --select-1 --exit-0 --prompt 'project> ' --height 60% --reverse \
+          --preview 'd={}; d=${d/#\~/$HOME}; git -C "$d" log --oneline --color -8; echo; git -C "$d" status --short | head -15' ) ||
+  { echo "no project selected"; exit 1; }
+dir=${dir/#\~/$HOME}
+name=$(basename "$dir")
+
+if [[ ${HERDR_ENV:-} != 1 ]]; then
+  echo "Run ws from a Herdr pane (start Herdr with: herdr)."
+  echo "Project: $dir"
+  exit 1
+fi
+
+existing=$(herdr workspace list | jq -r --arg l "$name" '.result.workspaces[]? | select(.label == $l) | .workspace_id' | head -1)
+if [[ -n $existing ]]; then
+  herdr workspace focus "$existing" >/dev/null
+  echo "focused existing workspace $name ($existing)"
+  exit 0
+fi
+
+ws=$(herdr workspace create --cwd "$dir" --label "$name" --focus)
+lead_pane=$(jq -r '.result.root_pane.pane_id' <<<"$ws")
+board_pane=$(herdr pane split "$lead_pane" --direction right --ratio 0.62 --cwd "$dir" --no-focus | jq -r '.result.pane.pane_id')
+herdr pane run "$board_pane" "orch board --watch"
+herdr pane run "$lead_pane" "$lead"
+herdr pane rename "$lead_pane" lead >/dev/null || true
+herdr pane rename "$board_pane" board >/dev/null || true
+
+[[ -f $dir/AGENTS.md ]] || echo "tip: $name has no AGENTS.md yet — run 'ctx-init' in it so every harness shares the same project rules"
+echo "opened $name: lead=$lead, board on the right"

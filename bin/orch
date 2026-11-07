@@ -1189,6 +1189,9 @@ def agent_status(name):
     s = herdr_state(name)
     if s is None:
         return "gone"
+    m = re.search(r'"agent_status"\s*:\s*"(\w+)"', s)
+    if m and m.group(1) in AGENT_STYLE:
+        return m.group(1)
     return next((w for w in ("blocked", "working", "done", "idle") if word(s, w)), "unknown")
 
 
@@ -1343,6 +1346,7 @@ if __name__ == "__main__":
         sys.exit(0 if len(sys.argv) < 2 else 2)
     ROOT = main_root()
     ORCH = ROOT / ".orchestrate"
-    ORCH.mkdir(exist_ok=True)
+    if sys.argv[1] not in ("board", "ci", "status"):   # read-only commands leave the repo untouched
+        ORCH.mkdir(exist_ok=True)
     STATE = ORCH / "state.json"
     COMMANDS[sys.argv[1]](sys.argv[2:])
