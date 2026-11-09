@@ -673,10 +673,12 @@ def panel_tui(args):
         TabbedContent { height: 1fr; margin: 0 1; }
         #gatebar { height: auto; display: none; padding: 0 1; }
         #gatebar.on { display: block; }
-        #actions { layout: grid; grid-size: 6; grid-gutter: 0 1; height: 7; margin: 0 1;
-                   border: round $accent; border-title-align: left; border-title-style: bold; }
-        #actions Button { width: 1fr; height: 5; min-width: 8; border: round $panel-lighten-2; background: ansi_default; }
-        #actions Button:hover { border: round $accent; }
+        #actions { layout: grid; grid-size: 6; height: 2; margin: 0 1; border-top: solid $accent 50%;
+                   border-title-align: left; border-title-color: $accent; }
+        #actions Button { width: 1fr; height: 1; min-width: 6; border: none; background: ansi_default;
+                          text-style: none; }
+        #actions Button:hover { background: $accent 25%; text-style: bold; }
+        #actions Button:focus { text-style: bold; }
         #actions Button:disabled { opacity: 40%; }
         #a-ship { color: ansi_bright_red; }
         #a-approve { color: ansi_bright_green; }
@@ -698,9 +700,9 @@ def panel_tui(args):
                                 with Horizontal(id="gatebar"):
                                     yield Button("⚑ Review & approve", id="gate", variant="warning")
             with Grid(id="actions") as g:
-                g.border_title = "Quick Actions"
+                g.border_title = "actions"
                 for aid, icon, label in ACTIONS:
-                    yield Button(f"{icon}\n{label}", id=f"a-{aid}")
+                    yield Button(f"{icon} {label}", id=f"a-{aid}")
 
         def on_mount(self):
             self.load()
