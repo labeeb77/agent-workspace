@@ -454,9 +454,11 @@ def render(ps, width, chrome=True):
     head = Table.grid(expand=True)
     head.add_column()
     head.add_column(justify="right")
-    head.add_row(Text(root.name if root else ps.cwd.name, style="bold"), Text(f" {branch}", style="magenta"))
+    head.add_row(Text("\uf07c  " + (root.name if root else ps.cwd.name), style="bold"),
+                 Text(f" {branch} ", style="bold reverse magenta") if branch else Text(""))
     head.add_row(Text.assemble((f"{sym} ", col), (lead or "no AI", "bold"), (f"  lead · {lstat}", "bright_black")),
                  Text(time.strftime("%H:%M"), style="bright_black"))
+    ps.head = head
     ps.header = Panel(head, border_style="bright_black", padding=(0, 1))
     if chrome:
         rows.append(ps.header)
@@ -650,10 +652,14 @@ def tui_base():
     return Base, Ask
 
 
+ACTIONS = [("switch", "\U000f04e1", "Switch AI"), ("run", "\uf04b", "Run plan"), ("approve", "\uf00c", "Approve"),
+           ("ship", "\uf135", "Ship"), ("diff", "\uf126", "Diff"), ("help", "\uf059", "Help")]
+
+
 def panel_tui(args):
     from textual import work
     from textual.binding import Binding
-    from textual.containers import Horizontal, VerticalScroll
+    from textual.containers import Grid, Horizontal, VerticalScroll
     from textual.widgets import Button, Footer, Static, TabbedContent, TabPane
 
     Base, Ask = tui_base()
@@ -663,10 +669,17 @@ def panel_tui(args):
     class StatusPanel(Base):
         CSS = """
         Screen { background: ansi_default; }
-        #head { height: auto; }
-        TabbedContent { height: 1fr; }
+        #head { height: auto; border: round $accent; padding: 0 1; margin: 0 1; }
+        TabbedContent { height: 1fr; margin: 0 1; }
         #gatebar { height: auto; display: none; padding: 0 1; }
         #gatebar.on { display: block; }
+        #actions { layout: grid; grid-size: 6; grid-gutter: 0 1; height: 7; margin: 0 1;
+                   border: round $accent; border-title-align: left; border-title-style: bold; }
+        #actions Button { width: 1fr; height: 5; min-width: 8; border: round $panel-lighten-2; background: ansi_default; }
+        #actions Button:hover { border: round $accent; }
+        #actions Button:disabled { opacity: 40%; }
+        #a-ship { color: ansi_bright_red; }
+        #a-approve { color: ansi_bright_green; }
         """
         BINDINGS = [Binding("s", "switch", "Switch AI"), Binding("r", "run", "Run plan"),
                     Binding("a", "approve", "Approve"), Binding("p", "ship", "Ship"), Binding("d", "diff", "Diff"),
@@ -677,14 +690,17 @@ def panel_tui(args):
         def compose(self):
             yield Static(id="head")
             with TabbedContent(initial="task"):
-                for tid, title in (("task", "1 Task"), ("changes", "2 Changes"), ("activity", "3 Activity")):
+                for tid, title in (("task", "\uf0ae Task"), ("changes", "\uf126 Changes"), ("activity", "\uf21e Activity")):
                     with TabPane(title, id=tid):
                         with VerticalScroll():
                             yield Static(id=f"v-{tid}")
                             if tid == "task":
                                 with Horizontal(id="gatebar"):
                                     yield Button("⚑ Review & approve", id="gate", variant="warning")
-            yield Footer()
+            with Grid(id="actions") as g:
+                g.border_title = "Quick Actions"
+                for aid, icon, label in ACTIONS:
+                    yield Button(f"{icon}\n{label}", id=f"a-{aid}")
 
         def on_mount(self):
             self.load()
@@ -700,7 +716,11 @@ def panel_tui(args):
             self.call_from_thread(self.show, body, ch, act, keys, gated, bool(st))
 
         def show(self, body, ch, act, keys, gated, plan):
-            self.query_one("#head", Static).update(getattr(ps, "header", ""))
+            self.query_one("#head", Static).update(getattr(ps, "head", ""))
+            n = len(git(ps.cwd, "status", "--short").splitlines()) if ps.root else 0
+            self.query_one(TabbedContent).get_tab("changes").label = f"\uf126 Changes {n}" if n else "\uf126 Changes"
+            for aid, need in (("run", "r"), ("approve", "a"), ("ship", "p")):
+                self.query_one(f"#a-{aid}", Button).disabled = need not in keys
             self.query_one("#v-task", Static).update(body)
             self.query_one("#v-changes", Static).update(ch)
             self.query_one("#v-activity", Static).update(act)
@@ -719,6 +739,8 @@ def panel_tui(args):
         def on_button_pressed(self, e):
             if e.button.id == "gate":
                 self.action_approve()
+            elif e.button.id.startswith("a-"):
+                getattr(self, f"action_{e.button.id[2:]}")()
 
         @work(thread=True)
         def cli(self, *cmd, cwd=None):

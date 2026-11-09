@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# ai-stat — one line for the herdr top bar: running agents, CPU and RAM.
+n=$(herdr agent list 2>/dev/null | jq '.result.agents | length' 2>/dev/null)
+read -r _ a b c d e f g _ < /proc/stat; t1=$((a+b+c+d+e+f+g)); i1=$((d+e)); sleep 0.3
+read -r _ a b c d e f g _ < /proc/stat; t2=$((a+b+c+d+e+f+g)); i2=$((d+e))
+cpu=$(( (100 * ((t2-t1) - (i2-i1))) / (t2-t1 > 0 ? t2-t1 : 1) ))
+ram=$(awk '/MemTotal/{t=$2} /MemAvailable/{a=$2} END{printf "%d", (t-a)*100/t}' /proc/meminfo)
+printf '\U000f06a9 %s agents    %s%%   \U000f035b %s%%\n' "${n:-0}" "$cpu" "$ram"
