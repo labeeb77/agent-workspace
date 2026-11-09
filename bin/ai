@@ -1,0 +1,554 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["rich>=13"]
+# ///
+"""ai — one entry point for the AI workspace (Herdr + Claude Code + Codex + orch).
+
+  ai [filter]                 pick a project and open it: lead AI on the left, status panel on the right
+  ai switch [claude|codex]    hand the current task to the other AI (it continues where the first stopped)
+        --quick               don't ask the current AI for notes first (e.g. it hit its usage limit)
+  ai run                      start the approved plan in the background (orch autopilot)
+  ai approve [Mn]             approve a step that is waiting for you
+  ai ship                     finish: commit, push and open a PR (asks before anything leaves your machine)
+  ai panel                    the status panel (opened automatically)
+
+Config (optional): ~/.config/ai/config.toml
+  lead  = "claude"            # AI that opens in new workspaces: claude | codex
+  roots = ["~/dev"]           # where your git repositories live
+"""
+import json, os, re, select, shlex, shutil, subprocess, sys, termios, time, tomllib, tty
+from pathlib import Path
+
+from rich.console import Console, Group
+from rich.panel import Panel
+from rich.progress_bar import ProgressBar
+from rich.prompt import Confirm
+from rich.table import Table
+from rich.text import Text
+from rich.live import Live
+
+console = Console()
+CONFIG = Path.home() / ".config/ai/config.toml"
+RECENT = Path.home() / ".local/state/ai/recent"
+HARNESSES = ("claude", "codex")
+RATE_RE = re.compile(r"usage limit|rate.?limit|quota exceeded|too many requests|limit reached|out of credits|"
+                     r"try again (in|at)", re.I)
+NOTES_PROMPT = ("Use the handoff skill now: write .orchestrate/handoff-notes.md so another AI can continue this task. "
+                "Do not run `orch handoff` and do not continue the task itself.")
+CONTINUE_PROMPT = "Read {path} and continue the task from where the previous AI stopped."
+COMMIT_PROMPT = ("Get the current work ready to ship: run the project's checks, fix anything you broke, then commit it "
+                 "with a clear message on a feature branch (create one if you are on the default branch). Do not push.")
+
+
+def config():
+    cfg = {"lead": "claude", "roots": ["~/dev"]}
+    if CONFIG.exists():
+        cfg |= tomllib.loads(CONFIG.read_text())
+    return cfg
+
+
+def die(msg):
+    console.print(f"[red]✘[/] {msg}")
+    sys.exit(1)
+
+
+def sh(args, cwd=None):
+    return subprocess.run(args, cwd=cwd, text=True, capture_output=True)
+
+
+def herdr(*args):
+    """Run a herdr API command and return its `result` (or None on failure)."""
+    r = sh(["herdr", *args])
+    if r.returncode != 0:
+        return None
+    try:
+        return json.loads(r.stdout).get("result")
+    except (json.JSONDecodeError, AttributeError):
+        return {}
+
+
+def git(cwd, *args):
+    r = sh(["git", *args], cwd=cwd)
+    return r.stdout.rstrip() if r.returncode == 0 else ""   # keep leading spaces (git status --short)
+
+
+def repo_root(cwd):
+    common = git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    return Path(common).parent if common else None
+
+
+def ago(ts):
+    s = int(time.time() - ts)
+    return f"{s}s" if s < 60 else f"{s // 60}m" if s < 3600 else f"{s // 3600}h" if s < 86400 else f"{s // 86400}d"
+
+
+# ------------------------------------------------------------------ herdr workspace helpers
+def server_running():
+    return "status: running" in sh(["herdr", "status"]).stdout
+
+
+def ensure_server():
+    if server_running():
+        return
+    subprocess.Popen(["herdr", "server"], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for _ in range(50):
+        time.sleep(0.1)
+        if server_running():
+            return
+    die("could not start the herdr server")
+
+
+def current_workspace():
+    wid = os.environ.get("HERDR_WORKSPACE_ID")
+    if not wid:
+        wss = (herdr("workspace", "list") or {}).get("workspaces", [])
+        wid = next((w["workspace_id"] for w in wss if w.get("focused")), None)
+    return wid
+
+
+def workspace_panes(wid):
+    return (herdr("pane", "list", "--workspace", wid) or {}).get("panes", [])
+
+
+def lead_pane(panes):
+    return (next((p for p in panes if p.get("label") == "lead"), None)
+            or next((p for p in panes if p.get("agent") in HARNESSES), None))
+
+
+def pane_tail(pane_id, lines=15):
+    return sh(["herdr", "pane", "read", pane_id, "--source", "visible", "--lines", str(lines)]).stdout
+
+
+# ------------------------------------------------------------------ ai [filter]: open a project
+def find_repos(roots):
+    paths = [str(Path(r).expanduser()) for r in roots if Path(r).expanduser().is_dir()]
+    if not paths:
+        die(f"none of {roots} exist — set `roots` in {CONFIG}")
+    r = sh(["find", *paths, "-maxdepth", "5", "(", "-name", "node_modules", "-o", "-name", "*-wt", "-o",
+            "-name", "build", "-o", "-name", "bin", "-o", "-name", "obj", ")", "-prune", "-o",
+            "-name", ".git", "-type", "d", "-printf", "%h\n"])
+    return sorted(set(r.stdout.split("\n")) - {""})
+
+
+def recent_list():
+    try:
+        return [l for l in RECENT.read_text().splitlines() if l]
+    except OSError:
+        return []
+
+
+def remember(path):
+    RECENT.parent.mkdir(parents=True, exist_ok=True)
+    RECENT.write_text("\n".join([str(path)] + [p for p in recent_list() if p != str(path)][:19]) + "\n")
+
+
+def pick_project(query):
+    repos = find_repos(config()["roots"])
+    rec = [p for p in recent_list() if p in repos]
+    ordered = rec + [p for p in repos if p not in rec]
+    home = str(Path.home())
+    lines = [f"{'★' if p in rec else ' '} {Path(p).name:<32} {p.replace(home, '~')}\t{p}" for p in ordered]
+    preview = ("git -C {2} -c color.ui=always log --oneline --decorate -8 2>/dev/null; echo; "
+               "git -C {2} -c color.status=always status --short 2>/dev/null | head -20")
+    r = subprocess.run(
+        ["fzf", "--delimiter", "\t", "--with-nth", "1", "--query", query, "--select-1", "--exit-0",
+         "--layout", "reverse", "--border", "rounded", "--border-label", " ai · open project ",
+         "--prompt", "  › ", "--pointer", "▌", "--marker", "✓", "--info", "inline-right",
+         "--header", "★ recent   enter open   esc cancel", "--header-first",
+         "--preview", preview, "--preview-window", "right,45%,border-left",
+         "--color", "border:8,label:5,prompt:5,pointer:5,hl:6,hl+:6,header:8,info:8"],
+        input="\n".join(lines), text=True, stdout=subprocess.PIPE)
+    if r.returncode != 0 or not r.stdout.strip():
+        sys.exit(0)
+    return Path(r.stdout.strip().split("\t")[-1])
+
+
+def prepare_repo(path):
+    """Keep task files out of git and give a brand-new repo shared AGENTS.md/CLAUDE.md."""
+    root = repo_root(path)
+    if root:
+        exclude = Path(git(path, "rev-parse", "--path-format=absolute", "--git-common-dir")) / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        lines = exclude.read_text().splitlines() if exclude.exists() else []
+        missing = [p for p in (".orchestrate/", ".orch-task/") if p not in lines]
+        if missing:
+            exclude.write_text("\n".join(lines + missing) + "\n")
+    if not (path / "AGENTS.md").exists() and not (path / "CLAUDE.md").exists():
+        sh(["ctx-init"], cwd=path)
+        console.print("[green]✔[/] created AGENTS.md + CLAUDE.md (shared project rules) — ask the AI to fill in the TODOs")
+
+
+def open_project(args):
+    lead = config()["lead"]
+    query = ""
+    for a in args:
+        if a in ("-c", "--codex"):
+            lead = "codex"
+        elif a in ("--claude",):
+            lead = "claude"
+        else:
+            query = a
+    path = pick_project(query)
+    ensure_server()
+    prepare_repo(path)
+    remember(path)
+    name = path.name
+    wss = (herdr("workspace", "list") or {}).get("workspaces", [])
+    existing = None
+    for w in wss:
+        if w.get("label") in (name, f"{name} · {path.parent.name}"):
+            if any(Path(p.get("cwd") or "/") == path or str(p.get("cwd") or "").startswith(f"{path}/")
+                   for p in workspace_panes(w["workspace_id"])):
+                existing = w["workspace_id"]
+    if existing:
+        herdr("workspace", "focus", existing)
+    else:
+        label = name if not any(w.get("label") == name for w in wss) else f"{name} · {path.parent.name}"
+        created = herdr("workspace", "create", "--cwd", str(path), "--label", label, "--focus") or die(
+            "herdr could not create the workspace")
+        existing = created["workspace"]["workspace_id"]
+        lead_id = created["root_pane"]["pane_id"]
+        panel = herdr("pane", "split", lead_id, "--direction", "right", "--ratio", "0.66", "--cwd", str(path),
+                      "--no-focus")
+        if panel:
+            pid = panel["pane"]["pane_id"]
+            herdr("pane", "rename", pid, "status")
+            herdr("pane", "run", pid, "ai panel")
+        herdr("pane", "rename", lead_id, "lead")
+        herdr("pane", "run", lead_id, lead)
+        herdr("workspace", "focus", existing)
+    if os.environ.get("HERDR_ENV") != "1":
+        os.execvp("herdr", ["herdr"])
+
+
+# ------------------------------------------------------------------ ai switch
+def switch(args):
+    quick = "--quick" in args
+    target = next((a for a in args if a in HARNESSES), None)
+    wid = current_workspace() or die("no herdr workspace found — open one with `ai`")
+    lp = lead_pane(workspace_panes(wid)) or die("no lead pane in this workspace")
+    cwd = lp.get("foreground_cwd") or lp.get("cwd")
+    root = repo_root(cwd) or die(f"{cwd} is not a git repository")
+    current = lp.get("agent")
+    target = target or ("codex" if current == "claude" else "claude")
+    if not shutil.which(target):
+        die(f"{target} is not installed")
+    if current == target:
+        die(f"the lead is already {target}")
+
+    if current and not quick:
+        status = lp.get("agent_status")
+        limited = bool(RATE_RE.search(pane_tail(lp["pane_id"])))
+        if status == "working" and not Confirm.ask(f"{current} is still working. Switch anyway?", default=False):
+            return
+        if status in ("idle", "done") and not limited:
+            with console.status(f"asking {current} to save its notes…"):
+                sh(["herdr", "agent", "prompt", lp["pane_id"], NOTES_PROMPT, "--wait", "--until", "idle",
+                    "--until", "done", "--timeout", "240000"])
+    with console.status("saving the task state…"):
+        r = sh(["orch", "handoff", "--from", lp["pane_id"]], cwd=cwd)
+        if r.returncode != 0:
+            die(r.stdout + r.stderr)
+    handoff = root / ".orchestrate" / "handoff.md"
+    new = herdr("pane", "split", lp["pane_id"], "--direction", "right", "--cwd", cwd, "--no-focus") or die(
+        "herdr could not open a new pane")
+    nid = new["pane"]["pane_id"]
+    herdr("pane", "close", lp["pane_id"])
+    herdr("pane", "rename", nid, "lead")
+    herdr("pane", "run", nid, f"{target} {shlex.quote(CONTINUE_PROMPT.format(path=handoff))}")
+    console.print(f"[green]✔[/] {current or 'lead'} → [bold]{target}[/]  (it was given {handoff.relative_to(root)})")
+
+
+# ------------------------------------------------------------------ ai run / approve / ship
+def plan_state(root):
+    f = root / ".orchestrate" / "state.json"
+    try:
+        return json.loads(f.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def autopilot_pid(root):
+    try:
+        pid = int((root / ".orchestrate" / "autopilot.pid").read_text())
+        os.kill(pid, 0)
+        return pid
+    except (OSError, ValueError):
+        return None
+
+
+def run_plan(args):
+    root = repo_root(Path.cwd()) or die("not inside a git repository")
+    if not (root / ".orchestrate" / "plan.md").exists():
+        die("no plan yet — describe the feature to the lead AI first")
+    if autopilot_pid(root):
+        console.print("[yellow]●[/] the plan is already running")
+        return
+    st = plan_state(root)
+    if st and all(t["status"] in ("merged", "skipped") for t in st["tasks"].values()):
+        console.print("[green]✔[/] the plan is already finished — `ai ship` (or p in the panel) opens the PR")
+        return
+    out = open(root / ".orchestrate" / "autopilot.out", "a")
+    p = subprocess.Popen(["orch", "autopilot"], cwd=root, start_new_session=True, stdout=out, stderr=subprocess.STDOUT)
+    (root / ".orchestrate" / "autopilot.pid").write_text(str(p.pid))
+    console.print("[green]✔[/] plan started — follow it in the status panel")
+
+
+def approve(args):
+    root = repo_root(Path.cwd()) or die("not inside a git repository")
+    st = plan_state(root) or die("no plan in this repository")
+    gated = [k for k, t in st["tasks"].items() if t["status"] == "awaiting-approval"]
+    todo = [a for a in args if a in gated] or gated
+    if not todo:
+        console.print("nothing is waiting for approval")
+        return
+    for tid in todo:
+        t = st["tasks"][tid]
+        console.print(f"[magenta]⚑[/] [bold]{tid}[/] {t['title']}  [dim]({t.get('dir')})[/]")
+        if Confirm.ask("  approve?", default=False):
+            sh(["orch", "approve", tid], cwd=root)
+            console.print("  [green]approved[/]")
+        elif Confirm.ask("  send it back with a note instead?", default=False):
+            why = console.input("  what should change? ")
+            sh(["orch", "reject", tid, why], cwd=root)
+
+
+def default_branch(cwd):
+    ref = git(cwd, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+    return ref.split("/", 1)[1] if "/" in ref else "main"
+
+
+def ship(args):
+    cwd = Path.cwd()
+    root = repo_root(cwd) or die("not inside a git repository")
+    st = plan_state(root)
+    if st:
+        tasks = [t for t in st["tasks"].values() if t["status"] != "skipped"]
+        done = sum(t["status"] == "merged" for t in tasks)
+        if done < len(tasks):
+            die(f"the plan is still running ({done}/{len(tasks)} steps done)")
+        summary = root / ".orchestrate" / "summary.md"
+        if summary.exists():
+            console.print(Panel(summary.read_text()[:3000], title="summary", border_style="bright_black"))
+        subprocess.call(["orch", "pr"], cwd=root)
+        return
+    branch, base = git(cwd, "branch", "--show-current"), default_branch(cwd)
+    dirty = git(cwd, "status", "--short")
+    if dirty:
+        console.print(Panel(dirty, title=f"uncommitted changes on {branch}", border_style="yellow"))
+        lp = lead_pane(workspace_panes(current_workspace() or ""))
+        if lp and Confirm.ask(f"Ask {lp.get('agent') or 'the lead'} to run the checks and commit this?", default=True):
+            sh(["herdr", "agent", "prompt", lp["pane_id"], COMMIT_PROMPT])
+            console.print("asked — press [bold]p[/] again when it has committed")
+        return
+    if branch == base:
+        die(f"you're on {base}; the work needs to be on a feature branch first (ask the lead AI)")
+    log_ = git(cwd, "log", "--oneline", f"origin/{base}..HEAD") or git(cwd, "log", "--oneline", f"{base}..HEAD")
+    if not log_:
+        console.print("nothing to ship — no commits ahead of " + base)
+        return
+    console.print(Panel(log_, title=f"{branch} → {base}", border_style="cyan"))
+    if not shutil.which("gh"):
+        die("gh is not installed")
+    if not Confirm.ask(f"Push {branch} and open a PR into {base}?", default=False):
+        return
+    if subprocess.call(["git", "push", "-u", "origin", "HEAD"], cwd=cwd) == 0:
+        subprocess.call(["gh", "pr", "create", "--fill", "--base", base], cwd=cwd)
+
+
+# ------------------------------------------------------------------ ai panel
+STATUS = {  # task status -> (symbol, style, label)
+    "merged": ("✔", "green", "done"), "skipped": ("·", "bright_black", "skipped"),
+    "pending": ("◌", "bright_black", "waiting"), "needs-answer": ("?", "yellow", "question"),
+    "paused": ("‖", "yellow", "paused"), "failed": ("✘", "red", "failed"), "conflict": ("⚡", "red", "conflict"),
+    "awaiting-approval": ("⚑", "magenta", "needs you"), "approved": ("⚑", "green", "approved"),
+    "coding": ("⟳", "cyan", "coding"), "verifying": ("⟳", "cyan", "testing"), "reviewing": ("⟳", "blue", "review"),
+    "awaiting-review": ("◌", "blue", "review"), "reviewed": ("⟳", "blue", "reviewed"),
+    "committed": ("⟳", "cyan", "merging"),
+}
+AGENT = {"working": ("●", "cyan"), "blocked": ("●", "yellow"), "idle": ("○", "bright_black"),
+         "done": ("●", "green"), "unknown": ("○", "bright_black")}
+
+
+class PanelState:
+    def __init__(self):
+        self.cwd = Path.cwd()
+        self.root = repo_root(self.cwd)
+        self.limited_at = 0
+        self.limited = False
+        self.message = ""
+
+    def snapshot(self):
+        wid = current_workspace()
+        panes = workspace_panes(wid) if wid else []
+        agents = [a for a in (herdr("agent", "list") or {}).get("agents", [])
+                  if wid and str(a.get("pane_id", "")).startswith(f"{wid}:")]
+        lp = lead_pane(panes)
+        if lp and time.time() - self.limited_at > 6:
+            self.limited_at = time.time()
+            self.limited = lp.get("agent_status") in ("idle", "done", "unknown") and bool(
+                RATE_RE.search(pane_tail(lp["pane_id"])))
+        return lp, agents
+
+
+def render(ps, width):
+    lp, agents = ps.snapshot()
+    rows = []
+    root = ps.root
+    branch = git(ps.cwd, "branch", "--show-current") if root else ""
+    lead = (lp or {}).get("agent")
+    lstat = (lp or {}).get("agent_status") or "unknown"
+    sym, col = AGENT.get(lstat, AGENT["unknown"])
+    head = Table.grid(expand=True)
+    head.add_column()
+    head.add_column(justify="right")
+    head.add_row(Text(root.name if root else ps.cwd.name, style="bold"), Text(f" {branch}", style="magenta"))
+    head.add_row(Text.assemble((f"{sym} ", col), (lead or "no AI", "bold"), (f"  lead · {lstat}", "bright_black")),
+                 Text(time.strftime("%H:%M"), style="bright_black"))
+    rows.append(Panel(head, border_style="bright_black", padding=(0, 1)))
+    other = "codex" if lead == "claude" else "claude"
+    if ps.limited:
+        rows.append(Panel(Text(f"{lead} hit its usage limit.\nPress s to continue in {other}.", style="bold"),
+                      border_style="red", padding=(0, 1)))
+    if not root:
+        rows.append(Text("\n  not a git repository", style="bright_black"))
+        return Group(*rows), []
+
+    st = plan_state(root)
+    keys = [("s", f"switch to {other}")]
+    orch_dir = root / ".orchestrate"
+    if st:
+        tasks = [(k, st["tasks"][k]) for k in st["order"] if st["tasks"][k]["status"] != "skipped"]
+        done = sum(t["status"] == "merged" for _, t in tasks)
+        running = autopilot_pid(root)
+        rows.append(Text.assemble(("\n PLAN  ", "bold bright_black"), (st.get("title") or st["branch"], "bold")))
+        bar = Table.grid(padding=(0, 1))
+        bar.add_row(Text(" "), ProgressBar(total=max(len(tasks), 1), completed=done, width=max(10, width - 14),
+                                           complete_style="green", finished_style="green"),
+                    Text(f"{done}/{len(tasks)}", style="bold"))
+        rows.append(bar)
+        tt = Table.grid(padding=(0, 1), expand=True)
+        tt.add_column(width=2)
+        tt.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
+        tt.add_column(no_wrap=True)
+        for tid, t in tasks:
+            sym, col, label = STATUS.get(t["status"], ("⟳", "cyan", t["status"]))
+            who = t.get("worker") or ""
+            if t["status"] == "pending":
+                waits = [d for d in t["deps"] if st["tasks"][d]["status"] != "merged"]
+                label = f"after {','.join(waits)}" if waits else "ready"
+            extra = f" {ago(t['wait']['since'])}" if t.get("wait") else ""
+            tt.add_row(Text(f" {sym}", style=col), Text(f"{t['title']}"),
+                       Text.assemble((f"{who} ", "bright_black"), (label + extra, col)))
+        rows.append(tt)
+        gated = [k for k, t in tasks if t["status"] == "awaiting-approval"]
+        questions = [(k, t) for k, t in tasks if t["status"] in ("needs-answer", "paused", "failed")]
+        if gated:
+            rows.append(Panel(Text(f"{', '.join(gated)} waiting for your approval — press a"), border_style="magenta",
+                              padding=(0, 1)))
+            keys.append(("a", "approve"))
+        for k, t in questions[:3]:
+            rows.append(Text(f" ? {k}: {t.get('reason') or t['status']}", style="yellow", overflow="ellipsis"))
+        workers = [a for a in agents if a.get("pane_id") != (lp or {}).get("pane_id")]
+        if workers:
+            line = Text(" ")
+            for a in workers:
+                s, c = AGENT.get(a.get("agent_status") or "unknown", AGENT["unknown"])
+                line.append(f"{s} ", style=c).append(f"{a.get('name') or a.get('agent')}  ")
+            rows += [Text("\n AGENTS", style="bold bright_black"), line]
+        log = orch_dir / "autopilot.log"
+        if log.exists():
+            rows.append(Text("\n ACTIVITY" + ("  ● running" if running else ""),
+                             style="bold bright_black" if not running else "bold cyan"))
+            for l in log.read_text().splitlines()[-6:]:
+                rows.append(Text(" " + l.split("\n")[0], style="bright_black", overflow="ellipsis", no_wrap=True))
+        if not running and done < len(tasks):
+            keys.insert(0, ("r", "run plan"))
+        if done == len(tasks):
+            keys.append(("p", "open PR"))
+    else:
+        req = orch_dir / "requirement.md"
+        notes = orch_dir / "handoff-notes.md"
+        task = next((l.strip("# ").strip() for l in req.read_text().splitlines() if l.strip()), "") if req.exists() else ""
+        rows.append(Text.assemble(("\n TASK  ", "bold bright_black"),
+                                  (task or "Type your request in the lead pane.", "bold" if task else "bright_black")))
+        if notes.exists():
+            text = notes.read_text()
+            m = re.search(r"#+\s*Next steps?\s*\n(.*?)(\n#|\Z)", text, re.S | re.I)
+            if m:
+                rows.append(Text("\n NEXT", style="bold bright_black"))
+                for l in [l for l in m.group(1).splitlines() if l.strip()][:4]:
+                    rows.append(Text("  " + l.strip(), overflow="ellipsis", no_wrap=True))
+        changes = git(ps.cwd, "status", "--short").splitlines()
+        rows.append(Text(f"\n CHANGES  {len(changes) or 'none'}", style="bold bright_black"))
+        for l in changes[:8]:
+            code, f = l[:2], l[3:]
+            col = "green" if "?" in code or "A" in code else "red" if "D" in code else "yellow"
+            rows.append(Text.assemble((f"  {code.strip():<2} ", col), (f, "")))
+        if len(changes) > 8:
+            rows.append(Text(f"  … {len(changes) - 8} more", style="bright_black"))
+        last = git(ps.cwd, "log", "-1", "--format=%h %s · %cr")
+        if last:
+            rows.append(Text.assemble(("\n LAST  ", "bold bright_black"), (last, "bright_black"),
+                                      no_wrap=True, overflow="ellipsis"))
+        if (orch_dir / "plan.md").exists():
+            keys.insert(0, ("r", "run plan"))
+        keys.append(("p", "ship"))
+    if ps.message:
+        rows.append(Text("\n " + ps.message, style="cyan"))
+    foot = Text(" ")
+    for k, label in keys:
+        foot.append(f" {k} ", style="reverse bold").append(f" {label}  ", style="bright_black")
+    rows += [Text(""), foot]
+    return Group(*rows), [k for k, _ in keys]
+
+
+def panel(args):
+    ps = PanelState()
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    actions = {"s": [sys.argv[0], "switch"], "r": [sys.argv[0], "run"], "a": [sys.argv[0], "approve"],
+               "p": [sys.argv[0], "ship"]}
+
+    def interactive(cmd):
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        console.clear()
+        subprocess.call(cmd, cwd=ps.cwd)
+        console.input("\n[bright_black]press enter to return[/]")
+        tty.setcbreak(fd)
+
+    try:
+        tty.setcbreak(fd)
+        while True:
+            with Live(console=console, screen=True, auto_refresh=False) as live:
+                keys, last = [], 0
+                while True:
+                    if time.time() - last > 2:
+                        body, keys = render(ps, console.width)
+                        live.update(body, refresh=True)
+                        last = time.time()
+                    if select.select([sys.stdin], [], [], 0.2)[0]:
+                        k = sys.stdin.read(1).lower()
+                        if k in keys and k in actions:
+                            break
+                        if k == "\x0c":   # ctrl+l: redraw
+                            last = 0
+            interactive(actions[k])
+            ps.limited_at = 0
+    except KeyboardInterrupt:
+        pass
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+COMMANDS = {"switch": switch, "run": run_plan, "approve": approve, "ship": ship, "panel": panel}
+
+if __name__ == "__main__":
+    a = sys.argv[1:]
+    if a and a[0] in ("-h", "--help", "help"):
+        print(__doc__)
+    elif a and a[0] in COMMANDS:
+        COMMANDS[a[0]](a[1:])
+    else:
+        open_project(a)

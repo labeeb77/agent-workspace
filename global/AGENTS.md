@@ -4,18 +4,28 @@ Shared by every harness: Codex reads this as `~/.codex/AGENTS.md`; Claude Code i
 `~/.claude/CLAUDE.md`. Source of truth: `~/dev/tools/agent-workspace/global/AGENTS.md`.
 Keep it short — it is loaded into every session.
 
-## Context and handoff
-- Project rules live in the repo's `AGENTS.md` (`CLAUDE.md` only imports it). Read it before working.
-- Task state lives in `<repo>/.orchestrate/` and in git, never only in your session.
-- If `.orchestrate/handoff.md` exists and the user says continue/resume, or you are near your usage or
-  context limit, use the `handoff` skill.
-- Multi-step features with several agents: the `orch-plan` and `orch-run` skills (Herdr + `orch`).
+## How to work
+- Read the repo's `AGENTS.md` first and follow it. If it still has TODO placeholders, offer once to fill
+  them in from the code (keep it under ~100 lines).
+- **Small task** (one area, a handful of files, no API/DB contract change): just do it, run the checks,
+  report briefly. No plan, no helper agents.
+- **Big task** (frontend + backend, schema changes, or several independent parts): use the `orch-plan`
+  skill. Ask only the questions that change the implementation, show the plan, and after the developer
+  approves, run `ai run` — the status panel shows progress. Don't start helper agents for small tasks.
+- Load a `role-*` skill when the work matches it (e.g. `role-backend-dotnet`, `role-frontend-react`).
 
-## Skills
-- Global skills: `~/.agents/skills` (canonical; linked into `~/.claude/skills` by `skills-link`).
-- Repo skills: `<repo>/.agents/skills` (`.claude/skills` is a symlink to it).
+## Keep the task resumable (any task longer than a few minutes)
+- At the start, save the request and the developer's answers to `.orchestrate/requirement.md`.
+- After each meaningful step, refresh `.orchestrate/handoff-notes.md` (≤ 40 lines: Goal, Done,
+  In progress, Next steps, Decisions, Gotchas, Checks). This is what another AI reads if you hit a
+  usage limit, so keep "Next steps" current.
+- If the developer says continue/resume, or `.orchestrate/handoff.md` is newer than your session, read
+  it first (`handoff` skill).
+- `.orchestrate/` is git-excluded; never commit it.
 
 ## Safety
-- Never commit secrets, `.env` files or credentials, and never print them into notes or handoff files.
-- Ask before destructive operations, database migrations on shared databases, force-pushes, merges into
-  the main branch, and deploys.
+- Never commit secrets, `.env` files or credentials, and never copy them into notes or handoff files.
+- Ask before: destructive git commands (reset --hard, force-push, branch deletion), database migrations
+  or schema changes against a real database, deleting existing features, deploys, publishing anything,
+  and merging into the default branch.
+- Don't push or open PRs unless the developer asks (they use `ai ship`).

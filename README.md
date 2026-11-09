@@ -1,53 +1,62 @@
-# agent-workspace
+# ai workspace
 
-A multi-agent dev workspace that sits on top of tools you already run: **Herdr** for terminals and agent
-state, **`orch`** as the deterministic scheduler, **skills** shared by every harness, and **files plus git**
-as the only shared memory. No daemon and no database.
+Claude Code and Codex as interchangeable coding AIs in one Herdr terminal workspace. You talk to one
+lead AI; it does small tasks itself and plans big ones for helper agents. A status panel shows
+progress, and switching AIs keeps the task's context.
 
 ```
-Herdr workspace (per project)                       orch (no LLM)                <repo>/.orchestrate/
-┌ lead: claude|codex ┬ board: orch board --watch ┐   plan.md → state.json         requirement.md  plan.md
-│ orch-plan/orch-run │ coders in worktrees       │ → deps · dispatch · checks  → state.json  handoff.md
-│ handoff skill      │ claude-1, codex-1, review │   review · gates · merge      decisions.md  summary.md
-└────────────────────┴───────────────────────────┘   handoff · PR · CI           (git-excluded)
+┌ spaces ─────┬─ lead ───────────────────────────────┬─ status ─────────────────────────┐
+│ ● ordero2   │  Claude                              │ ordero2                      dev │
+│             │                                      │ ● claude  lead · working         │
+│ agents      │  > Build customer list with search   │                                  │
+│ ● claude    │                                      │ PLAN  Customer management        │
+│ ● codex-1   │                                      │ ━━━━━━━━━━━━━━━━━━━━━━━━━━  4/6  │
+│             │                                      │ ✔ API contract     codex-1 done  │
+│             │                                      │ ⟳ List UI          claude-1 7m   │
+│             │                                      │ ⚑ Migration        needs you     │
+│             │                                      │  s switch  a approve  p ship     │
+└─────────────┴──────────────────────────────────────┴──────────────────────────────────┘
 ```
 
-## Install
+## Everyday use
+
+| You want to… | Do this |
+|---|---|
+| Open a project | `ai` from any terminal, or **prefix+a** inside Herdr (prefix = ctrl+space) |
+| Start with Codex as the lead | `ai -c` |
+| Give it work | type the request in the lead pane |
+| Run an approved plan | the lead runs `ai run`, or press **r** in the panel |
+| Approve a step waiting for you | **a** in the panel |
+| Switch Claude ⇄ Codex | **s** in the panel, or **prefix+alt+s** (`ai switch --quick` if it's rate-limited) |
+| Finish (commit, push, PR) | **p** in the panel (`ai ship`). It always asks before pushing. |
+
+## How it works
+
+- **Herdr** handles the terminals, sidebar and agent status. **`orch`** (bin/orch) is the plain-Python
+  scheduler that runs plans: dependencies, worktrees, checks, review, approval gates, merges.
+  **`ai`** (bin/ai) is the front door and the status panel.
+- **Shared context:** `~/.agents/AGENTS.md` holds the global rules for both AIs. Each repo's `AGENTS.md`
+  holds project rules, and `CLAUDE.md` just imports it. Task state lives in `<repo>/.orchestrate/`
+  (git-excluded): `requirement.md`, `handoff-notes.md`, `plan.md`, `state.json`, `summary.md`.
+- **Switching** saves the notes and git state to `.orchestrate/handoff.md`, then opens the other AI
+  in the lead's place with "read it and continue".
+- **Skills** live in `~/.agents/skills` (Codex reads that folder; each skill is symlinked into
+  `~/.claude/skills`): `orch-plan`, `orch-run`, `handoff`, plus the `role-*` specialists for React/Next,
+  .NET/EF, Node, SQL, code review and security review.
+
+## Install / update
 
 ```bash
-~/dev/tools/agent-workspace/install.sh     # idempotent; never overwrites a file that differs
+~/dev/tools/agent-workspace/install.sh    # idempotent; links tools, skills, global rules, herdr keys
 ```
 
-It links:
+Optional `~/.config/ai/config.toml`:
 
-- `bin/*` into `~/.local/bin`
-- `skills/*` into `~/.agents/skills` (the canonical folder, which Codex reads natively); `skills-link` then links every skill there into `~/.claude/skills`
-- `global/AGENTS.md` as `~/.agents/AGENTS.md`, which `~/.codex/AGENTS.md` links to and `~/.claude/CLAUDE.md` imports (`@~/.agents/AGENTS.md`)
+```toml
+lead  = "claude"     # or "codex"
+roots = ["~/dev"]    # where your repositories live
+```
 
-## Daily use
+## Later (not built yet)
 
-| Step | Command |
-|---|---|
-| Open a project (inside Herdr) | `ws [filter] [--lead codex]`: fzf picker, then a workspace with the lead on the left and the board on the right |
-| One-time per repo | `ctx-init`: `AGENTS.md` becomes the shared rules file and `CLAUDE.md` = `@AGENTS.md` (`--migrate` converts an existing CLAUDE.md) |
-| Plan a feature | in the lead: `/orch-plan <requirement>` (Codex: `$orch-plan …`), then edit `.orchestrate/plan.md` |
-| Run it | `orch autopilot` (no AI in the loop), or `/orch-run` to have the lead drive |
-| Watch | `orch board --watch` |
-| Approval gates | tasks with `Approve: yes` stop after checks and review: `orch approve M3` / `orch reject M3 "why"` |
-| Switch harness mid-task | say "handoff" in the agent (skill writes notes), or run `orch handoff [--from codex-1] [--to claude-1]`; in the other harness: "continue from .orchestrate/handoff.md" |
-| Ship | `orch pr [--draft]` (asks before pushing), `orch ci --watch` |
-
-Rate limits: when autopilot sees a coder hit a usage limit, it parks the task with a wip commit and benches
-that coder for `ORCH_COOLDOWN_MIN` (default 60). It then gives the task to the other coder, with the limit
-reason and the last terminal lines in `task.md`.
-
-## Adding things
-
-- **Global skill:** put a `SKILL.md` folder in `~/.agents/skills/<name>` (or in `skills/` here, then `install.sh`), then run `skills-link`.
-- **Repo skill:** put it in `<repo>/.agents/skills/<name>`; `.claude/skills` is a symlink to it (`skills-link --project`).
-- **Another harness:** Herdr already detects opencode, gemini, amp and others. List them in the plan's `Workers:` line.
-
-## Not done yet (roadmap)
-
-Role skills (backend, frontend, db, security-review), shared MCP config across harnesses, harness choice
-from past results, and token/cost tracking.
+Shared MCP tools (Playwright, databases), tasks spanning frontend and backend repos, usage/cost display.

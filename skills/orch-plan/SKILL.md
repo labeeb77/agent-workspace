@@ -59,6 +59,7 @@ Depends on: none
 Prefer: any | claude | codex
 Review: yes | no
 Approve: yes | no
+Role: frontend-react | backend-dotnet | backend-node | database-sql | none
 Likely files: src/a.ts, src/b.ts
 Goal: <one sentence>
 Scope:
@@ -73,17 +74,19 @@ Notes from user:
 Write each task section so it stands alone: in autopilot mode, `orch write-task` hands the section to the worker verbatim, plus the global instructions and the reports of the tasks it depends on. Anything the worker needs must be in its own section.
 
 How to split the work into tasks:
+- **Is a plan even needed?** If the request is one area and a handful of files, don't write a plan: tell the developer you'll just do it, and do it yourself. Plans are for work with several parts.
 - **Size**: 2–6 tasks. Each task is a cohesive slice one agent can finish in one sitting, and tightly coupled work stays together.
 - **Dependencies are a graph, not a list.** M3 `Depends on: M1, M2` means M3 starts only after M1 and M2 are merged, so its branch contains their code. Leave independent work dependency-free so it can run in parallel. Typical shape: contract or schema first, then backend and frontend in parallel, then integration.
 - **Contracts first.** When two parallel tasks must agree on something (API shape, types, DB schema), put that agreement in an earlier task they both depend on, or spell it out exactly in both tasks' Scope. Never let two parallel agents invent the same interface separately.
 - **List realistic Likely files.** `orch sync` warns when two parallel tasks touch the same file. Then either add a dependency or accept a likely merge conflict.
 - **Prefer**: `claude` for UI and refactors, `codex` for focused backend or test work, otherwise `any`. This is a preference, not a lock: if the preferred agent is busy or rate-limited, the other one takes the task.
 - **Review**: `yes` for UI, API contracts, auth, payments and schema changes.
+- **Role**: the specialist skill the worker loads first (`role-<name>`). Pick the one matching the task's stack; `none` if nothing fits.
 - **Approve**: `yes` for database migrations, destructive data changes, auth/permissions, payments, deleting features, or anything the developer flagged. Such a task stops after checks and review until the developer runs `orch approve Mn` (or `orch reject Mn "<why>"`). Leave routine work at `no` — don't add gates the developer has to click through for nothing.
 - **ZERO GUESSWORK**: missing business rules, undefined data shapes, and auth or security tradeoffs go under "Open questions" with 2–3 concrete options. `orch sync` marks such tasks `needs-answer`, and anything depending on them waits.
 
 ## 6. Validate and hand back
 - Run `orch sync`. Fix every ERROR (unknown dependency, cycle, bad header) and re-run. Report every WARN to the user.
 - Run `orch status` and show the user the table, the parallel shape (which tasks run together), and all open questions.
-- Then say: "Plan written to .orchestrate/plan.md. Edit it: untick `[x]` to skip a task, change `Depends on`/`Prefer`, answer open questions under 'Notes from user' and set 'Open questions: - none', add global instructions. Then either run `orch autopilot` in a terminal (cheapest: no AI in the loop), or run orch-run to let me drive (Claude Code / OpenCode: `/orch-run`; Codex: `$orch-run`; Amp: "use the orch-run skill"). Follow progress with `orch board --watch` in a side pane."
+- Then say: "Plan written to .orchestrate/plan.md. Edit it: untick `[x]` to skip a task, change `Depends on`/`Prefer`, answer open questions under 'Notes from user' and set 'Open questions: - none', add global instructions. When you're happy, say go." When the developer approves, run `ai run` (autopilot in the background; the status panel on the right shows progress and asks for approvals). If they'd rather have you drive each step, use the orch-run skill instead.
 - STOP.

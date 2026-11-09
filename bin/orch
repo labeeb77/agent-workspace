@@ -505,7 +505,8 @@ def cmd_review(args):
         f"# Review {tid}: {t['title']} (round {k})\n\n"
         f"Spec and acceptance criteria: {rel}/task.md\nChanges: {rel}/diff.patch\n\n"
         "Review for correctness against the acceptance criteria, API/contract consistency, UI/UX, security, "
-        "edge cases and missing tests. Do NOT edit any code.\n"
+        "edge cases and missing tests, using the `role-code-review` skill (plus `role-security-review` when auth, "
+        "payments, user input, file access or data queries changed). Do NOT edit any code.\n"
         "Write one finding per line (max 15 lines), each starting with `BLOCKER:` (must fix before merge) or `SUGGESTION:`.\n"
         f"Write them to {rel}/review-{k}.md (write `NO FINDINGS` if clean), then create the empty file "
         f"{rel}/done-{k} as your very last action.\n")
@@ -767,7 +768,11 @@ def cmd_write_task(args):
     secs, glob = plan_sections()
     if tid not in secs:
         die(f"{tid} not found in plan.md")
-    parts = [f"# Task {tid}: {t['title']}", "", secs[tid].replace(f"## [x] {tid}:", "Title:", 1), ""]
+    parts = [f"# Task {tid}: {t['title']}", ""]
+    role = re.search(r"^Role:\s*([\w-]+)", secs[tid], re.M)
+    if role and role.group(1).lower() != "none":
+        parts += [f"Before you start, load the `role-{role.group(1).lower()}` skill and follow it.", ""]
+    parts += [secs[tid].replace(f"## [x] {tid}:", "Title:", 1), ""]
     if glob and glob.lower() not in ("none", "<empty — user may fill in>"):
         parts += ["## Global instructions", glob, ""]
     ctx = []

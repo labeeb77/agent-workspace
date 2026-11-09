@@ -7,11 +7,11 @@ You are the LEAD (Claude Code, Codex, OpenCode or Amp). Load the `herdr` skill f
 Extra user input = whatever the user wrote alongside invoking this skill (answers, overrides, or nothing).
 
 ## Two ways to drive a run — pick one per run
-- **Autopilot (cheapest, recommended for long runs):** the developer runs `orch autopilot` in a terminal. A plain script then dispatches, polls, runs checks, sends fixes, reviews and merges with no AI in the loop. It exits 0 on ALL_DONE, or 3 when a human is needed (and writes why to `.orchestrate/autopilot.log`).
+- **Autopilot (cheapest, recommended for long runs):** `ai run` starts `orch autopilot` in the background (the status panel shows it). A plain script then dispatches, polls, runs checks, sends fixes, reviews and merges with no AI in the loop. It exits 0 on ALL_DONE, or 3 when a human is needed (and writes why to `.orchestrate/autopilot.log`).
   When the developer invokes you after autopilot stopped, you are the **exception handler**, not the driver:
   1. Read `orch status` and the last ~30 lines of `.orchestrate/autopilot.log`.
   2. For each paused/failed/needs-answer task: explain the problem in one or two lines, ask the developer, write the answer into that task's "Notes from user" in plan.md, set "Open questions: - none", run `orch set Mn pending`.
-  3. Tell the developer to run `orch autopilot` again. Do NOT start the scheduler loop yourself unless they ask you to drive.
+  3. Run `ai run` again (or tell the developer to press `r` in the status panel). Do NOT start the scheduler loop yourself unless they ask you to drive.
   4. On ALL_DONE: finish `.orchestrate/summary.md`. Autopilot already wrote tasks, commits, files and suggestions. You add "Design decisions & study notes" and the "Manual verification checklist".
 - **AI-driven (this playbook below):** you run the scheduler loop yourself. Use it when the developer asks, or when the baseline check is already failing (autopilot refuses to start then, because judging "no new failures" needs you).
 

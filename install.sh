@@ -17,7 +17,7 @@ link() {  # link <target> <link-path>
 }
 
 # 1. tools
-for f in "$here"/bin/*; do link "$f" "$HOME/.local/bin/$(basename "$f")"; done
+for f in "$here"/bin/*; do [[ -f $f ]] || continue; link "$f" "$HOME/.local/bin/$(basename "$f")"; done
 
 # 2. skills: canonical copies in ~/.agents/skills, which Codex reads natively
 for d in "$here"/skills/*/; do
@@ -28,7 +28,34 @@ for d in "$here"/skills/*/; do
 done
 "$here/bin/skills-link"   # ... and expose all of them to Claude Code
 
-# 3. global instructions shared by every harness
+# 3. herdr shortcuts: prefix+a opens a project, prefix+alt+s switches the lead AI
+herdr_cfg=$HOME/.config/herdr/config.toml
+if [[ -f $herdr_cfg ]] && ! grep -q '# >>> ai workspace >>>' "$herdr_cfg"; then
+  cat >> "$herdr_cfg" <<'EOF'
+
+# >>> ai workspace >>> (managed by ~/dev/tools/agent-workspace/install.sh)
+[[keys.command]]
+key = "prefix+a"
+type = "popup"
+command = "ai"
+width = "80%"
+height = "70%"
+
+[[keys.command]]
+key = "prefix+alt+s"
+type = "popup"
+command = "ai switch"
+width = "60%"
+height = "40%"
+# <<< ai workspace <<<
+EOF
+  echo "added herdr shortcuts (prefix+a, prefix+alt+s)"
+  herdr server reload-config >/dev/null 2>&1 || true
+else
+  echo "ok     herdr shortcuts"
+fi
+
+# 4. global instructions shared by every harness
 link "$here/global/AGENTS.md" "$HOME/.agents/AGENTS.md"
 link "$HOME/.agents/AGENTS.md" "$HOME/.codex/AGENTS.md"
 claude_md=$HOME/.claude/CLAUDE.md
