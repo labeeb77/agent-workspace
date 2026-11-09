@@ -35,7 +35,7 @@ from a shell; it captures that agent's last terminal output instead.
    first to refresh it.
 2. Verify before trusting: check `git status` and the diff against the notes; run the check command.
 3. Continue from "Next steps". If something in the notes contradicts the code, believe the code and say so.
-4. When you stop, hand off again (above) so the chain never breaks.
+4. Keep `.orchestrate/handoff-notes.md` current as you work (step 1 above). Do NOT run `orch handoff` yourself unless the developer asks: `ai switch` runs it when they change AI.
 
 If `.orchestrate/state.json` exists, the task is part of an orch plan: as the lead, invoke the
 `orch-run` skill instead of working on tasks yourself.
