@@ -146,16 +146,24 @@ def remember(path):
 def pick_project(query):
     repos = find_repos(config()["roots"])
     rec = [p for p in recent_list() if p in repos]
-    ordered = rec + [p for p in repos if p not in rec]
+    live = {w["label"].split(" · ")[0]: w.get("agent_status") or "idle"
+            for w in (herdr("workspace", "list") or {}).get("workspaces", [])}
+    opened = [p for p in rec + repos if Path(p).name in live]
+    ordered = list(dict.fromkeys(opened + rec + repos))
     home = str(Path.home())
-    lines = [f"{'★' if p in rec else ' '} {Path(p).name:<32} {p.replace(home, '~')}\t{p}" for p in ordered]
+
+    def row(p):
+        name = Path(p).name
+        mark, state = ("▶", live[name]) if p in opened else ("★", "") if p in rec else (" ", "")
+        return f"{mark} {name:<26} {state:<8} {p.replace(home, '~')}\t{p}"
+    lines = [row(p) for p in ordered]
     preview = ("git -C {2} -c color.ui=always log --oneline --decorate -8 2>/dev/null; echo; "
                "git -C {2} -c color.status=always status --short 2>/dev/null | head -20")
     r = subprocess.run(
         ["fzf", "--delimiter", "\t", "--with-nth", "1", "--query", query, "--select-1", "--exit-0",
          "--layout", "reverse", "--border", "rounded", "--border-label", " ai · open project ",
          "--prompt", "  › ", "--pointer", "▌", "--marker", "✓", "--info", "inline-right",
-         "--header", "★ recent   enter open   esc cancel", "--header-first",
+         "--header", "▶ open   ★ recent   enter open/jump   esc cancel", "--header-first",
          "--preview", preview, "--preview-window", "right,45%,border-left",
          "--color", "border:8,label:5,prompt:5,pointer:5,hl:6,hl+:6,header:8,info:8"],
         input="\n".join(lines), text=True, stdout=subprocess.PIPE)
@@ -371,8 +379,44 @@ AGENT = {"working": ("●", "cyan"), "blocked": ("●", "yellow"), "idle": ("○
          "done": ("●", "green"), "unknown": ("○", "bright_black")}
 
 
+VIEWS = {"1": "task", "2": "changes", "3": "activity", "?": "help"}
+HELP = [("s", "switch Claude ⇄ Codex"), ("r", "run the approved plan"), ("a", "approve a waiting step"),
+        ("p", "ship: commit, push, PR"), ("d", "full diff (q to close)"), ("1 2 3", "task / changes / activity"),
+        ("?", "this help"), ("^␣ a", "open or jump to a project"), ("alt ↑↓", "previous / next project"),
+        ("^␣ b", "hide / show the sidebar")]
+
+
+def extra_view(view, cwd, orch_dir):
+    rows = []
+    if view == "changes":
+        stat = {}
+        for l in git(cwd, "diff", "--numstat", "HEAD").splitlines():
+            a, d, f = (l.split("\t", 2) + ["", ""])[:3]
+            stat[f] = (a, d)
+        files = git(cwd, "status", "--short").splitlines()
+        rows.append(Text(f"\n {len(files) or 'No'} changed file(s)", style="bold bright_black"))
+        for l in files[:30]:
+            code, f = l[:2].strip(), l[3:]
+            a, d = stat.get(f, ("", ""))
+            rows.append(Text.assemble((f"  {code:<2} ", "yellow"), (f, ""), (f"  +{a}" if a else "", "green"),
+                                      (f" -{d}" if d else "", "red"), no_wrap=True, overflow="ellipsis"))
+        if files:
+            rows.append(Text("\n  press d for the full diff", style="bright_black"))
+    elif view == "activity":
+        src = next((f for f in (orch_dir / "autopilot.log", orch_dir / "handoff-notes.md") if f.exists()), None)
+        rows.append(Text(f"\n {src.name if src else 'No activity yet'}", style="bold bright_black"))
+        for l in (src.read_text().splitlines()[-30:] if src else []):
+            rows.append(Text(" " + l, overflow="ellipsis", no_wrap=True))
+    else:
+        rows.append(Text("\n KEYS", style="bold bright_black"))
+        for k, what in HELP:
+            rows.append(Text.assemble((f"  {k:<8}", "bold"), (what, "bright_black")))
+    return rows
+
+
 class PanelState:
     def __init__(self):
+        self.view = "task"
         self.cwd = Path.cwd()
         self.root = repo_root(self.cwd)
         self.limited_at = 0
@@ -418,7 +462,13 @@ def render(ps, width):
     st = plan_state(root)
     keys = [("s", f"switch to {other}")]
     orch_dir = root / ".orchestrate"
-    if st:
+    tabs = Text(" ")
+    for k, v in list(VIEWS.items())[:3]:
+        tabs.append(f" {k} {v.title()} ", style="reverse bold" if v == ps.view else "bright_black")
+    rows.append(tabs)
+    if ps.view != "task":
+        rows += extra_view(ps.view, ps.cwd, orch_dir)
+    elif st:
         tasks = [(k, st["tasks"][k]) for k in st["order"] if st["tasks"][k]["status"] != "skipped"]
         done = sum(t["status"] == "merged" for _, t in tasks)
         running = autopilot_pid(root)
@@ -495,6 +545,7 @@ def render(ps, width):
         if (orch_dir / "plan.md").exists():
             keys.insert(0, ("r", "run plan"))
         keys.append(("p", "ship"))
+    keys.append(("?", "help"))
     if ps.message:
         rows.append(Text("\n " + ps.message, style="cyan"))
     foot = Text(" ")
@@ -509,13 +560,14 @@ def panel(args):
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
     actions = {"s": [sys.argv[0], "switch"], "r": [sys.argv[0], "run"], "a": [sys.argv[0], "approve"],
-               "p": [sys.argv[0], "ship"]}
+               "p": [sys.argv[0], "ship"], "d": ["sh", "-c", "git -c color.ui=always diff HEAD | less -R"]}
 
     def interactive(cmd):
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
         console.clear()
         subprocess.call(cmd, cwd=ps.cwd)
-        console.input("\n[bright_black]press enter to return[/]")
+        if cmd[0] != "sh":
+            console.input("\n[bright_black]press enter to return[/]")
         tty.setcbreak(fd)
 
     try:
@@ -530,7 +582,10 @@ def panel(args):
                         last = time.time()
                     if select.select([sys.stdin], [], [], 0.2)[0]:
                         k = sys.stdin.read(1).lower()
-                        if k in keys and k in actions:
+                        if k in VIEWS:
+                            ps.view, last = VIEWS[k], 0
+                            continue
+                        if (k in keys and k in actions) or k == "d":
                             break
                         if k == "\x0c":   # ctrl+l: redraw
                             last = 0
