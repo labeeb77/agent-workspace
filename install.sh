@@ -28,7 +28,7 @@ for d in "$here"/skills/*/; do
 done
 "$here/bin/skills-link"   # ... and expose all of them to Claude Code
 
-# 3. herdr shortcuts: prefix+a opens a project, prefix+alt+s switches the lead AI
+# 3. herdr shortcuts: prefix+a opens a project, prefix+alt+s switches the lead AI, prefix+f focus mode
 herdr_cfg=$HOME/.config/herdr/config.toml
 if [[ -f $herdr_cfg ]] && ! grep -q '# >>> ai workspace >>>' "$herdr_cfg"; then
   cat >> "$herdr_cfg" <<'EOF'
@@ -47,6 +47,11 @@ type = "popup"
 command = "ai switch"
 width = "60%"
 height = "40%"
+
+[[keys.command]]
+key = "prefix+f"
+type = "shell"
+command = "ai focus"
 # <<< ai workspace <<<
 EOF
   echo "added herdr shortcuts (prefix+a, prefix+alt+s)"

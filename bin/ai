@@ -224,7 +224,7 @@ def open_path(path, lead):
             "herdr could not create the workspace")
         existing = created["workspace"]["workspace_id"]
         lead_id = created["root_pane"]["pane_id"]
-        panel = herdr("pane", "split", lead_id, "--direction", "right", "--ratio", "0.66", "--cwd", str(path),
+        panel = herdr("pane", "split", lead_id, "--direction", "right", "--ratio", "0.74", "--cwd", str(path),
                       "--no-focus")
         if panel:
             pid = panel["pane"]["pane_id"]
@@ -235,6 +235,12 @@ def open_path(path, lead):
         herdr("workspace", "focus", existing)
     if os.environ.get("HERDR_ENV") != "1":
         os.execvp("herdr", ["herdr"])
+
+
+def focus(args):
+    """Toggle focus mode: the lead pane fills the workspace (Herdr zoom)."""
+    lp = lead_pane(workspace_panes(current_workspace() or "")) or die("no lead pane in this workspace")
+    herdr("pane", "zoom", "--pane", lp["pane_id"], "--toggle")
 
 
 # ------------------------------------------------------------------ ai switch
@@ -373,29 +379,69 @@ def ship(args):
 
 
 # ------------------------------------------------------------------ ai panel
+G, Y, R, P, C = "#4ADE80", "#FBBF24", "#F87171", "#A78BFA", "#38BDF8"  # theme palette
 STATUS = {  # task status -> (symbol, style, label)
-    "merged": ("✔", "green", "done"), "skipped": ("·", "bright_black", "skipped"),
-    "pending": ("◌", "bright_black", "waiting"), "needs-answer": ("?", "yellow", "question"),
-    "paused": ("‖", "yellow", "paused"), "failed": ("✘", "red", "failed"), "conflict": ("⚡", "red", "conflict"),
-    "awaiting-approval": ("⚑", "magenta", "needs you"), "approved": ("⚑", "green", "approved"),
-    "coding": ("⟳", "cyan", "coding"), "verifying": ("⟳", "cyan", "testing"), "reviewing": ("⟳", "blue", "review"),
-    "awaiting-review": ("◌", "blue", "review"), "reviewed": ("⟳", "blue", "reviewed"),
-    "committed": ("⟳", "cyan", "merging"),
+    "merged": ("✔", G, "done"), "skipped": ("·", "bright_black", "skipped"),
+    "pending": ("◌", "bright_black", "waiting"), "needs-answer": ("?", Y, "question"),
+    "paused": ("‖", Y, "paused"), "failed": ("✘", R, "failed"), "conflict": ("⚡", R, "conflict"),
+    "awaiting-approval": ("⚑", Y, "needs you"), "approved": ("⚑", G, "approved"),
+    "coding": ("⟳", C, "coding"), "verifying": ("⟳", C, "testing"), "reviewing": ("⟳", C, "review"),
+    "awaiting-review": ("◌", C, "review"), "reviewed": ("⟳", C, "reviewed"),
+    "committed": ("⟳", C, "merging"),
 }
-AGENT = {"working": ("●", "cyan"), "blocked": ("●", "yellow"), "idle": ("○", "bright_black"),
-         "done": ("●", "green"), "unknown": ("○", "bright_black")}
+AGENT = {"working": ("●", C), "blocked": ("●", Y), "idle": ("○", "bright_black"),
+         "done": ("●", G), "unknown": ("○", "bright_black")}
 
 
 VIEWS = {"1": "task", "2": "changes", "3": "activity", "?": "help"}
 HELP = [("s", "switch Claude ⇄ Codex"), ("r", "run the approved plan"), ("a", "approve a waiting step"),
-        ("p", "ship: commit, push, PR"), ("d", "full diff (q to close)"), ("1 2 3", "task / changes / activity"),
+        ("p", "ship: commit, push, PR"), ("d", "full diff (q to close)"), ("1-5", "task / plan / git / activity / agents"),
+        ("f", "focus mode: lead full screen (again to restore)"),
         ("?", "this help"), ("^␣ a", "open or jump to a project"), ("alt ↑↓", "previous / next project"),
         ("^␣ b", "hide / show the sidebar")]
 
 
 def extra_view(view, cwd, orch_dir):
     rows = []
-    if view == "changes":
+    if view == "plan":
+        st = plan_state(cwd) if (orch_dir / "state.json").exists() else None
+        if not st:
+            msg = "plan.md ready — press r to run it" if (orch_dir / "plan.md").exists() else \
+                "No plan. Small tasks run directly in the lead."
+            return [Text("\n " + msg, style="bright_black")]
+        ss = [t["status"] for t in st["tasks"].values() if t["status"] != "skipped"]
+        stage = lambda act, fin: ("●", C) if any(x in act for x in ss) else ("✔", G) if fin else ("○", "bright_black")
+        merged = all(x == "merged" for x in ss)
+        line = Text(" ")
+        for name, (sym, col) in (("Plan", ("✔", G)),
+                                 ("Develop", stage(("coding", "committed"), not any(x in ("pending", "coding") for x in ss))),
+                                 ("Review", stage(("reviewing", "awaiting-review", "reviewed", "awaiting-approval"), merged)),
+                                 ("Test", stage(("verifying",), merged))):
+            line.append(f"{sym} ", style=col).append(f"{name}   ", style="bold" if col == C else "")
+        rows += [Text("\n " + (st.get("title") or st["branch"]), style="bold"), line, Text("")]
+        for tid in st["order"]:
+            t = st["tasks"][tid]
+            sym, col, label = STATUS.get(t["status"], ("⟳", C, t["status"]))
+            rows.append(Text.assemble((f" {sym} ", col), (f"{tid} {t['title']}", ""),
+                                      (f"  {t.get('worker') or ''} {label}", "bright_black"), no_wrap=True, overflow="ellipsis"))
+    elif view == "agents":
+        wid = current_workspace()
+        st = plan_state(cwd) if (orch_dir / "state.json").exists() else {}
+        gated = {t.get("worker") for t in (st or {}).get("tasks", {}).values() if t["status"] == "awaiting-approval"}
+        agents = [a for a in (herdr("agent", "list") or {}).get("agents", []) if str(a.get("pane_id", "")).startswith(f"{wid}:")]
+        rows.append(Text(f"\n {len(agents) or 'No'} agent(s) here", style="bold bright_black"))
+        for a in agents:
+            name = a.get("name") or a.get("agent")
+            state = "waiting for approval" if name in gated else a.get("agent_status") or "unknown"
+            sym, col = (("⚑", Y) if name in gated else AGENT.get(state, AGENT["unknown"]))
+            rows.append(Text.assemble((f"  {sym} ", col), (f"{name:<12}", "bold"), (state, col if col != "bright_black" else "bright_black")))
+    elif view == "changes":
+        branch = git(cwd, "branch", "--show-current")
+        ahead = git(cwd, "log", "--oneline", f"{default_branch(cwd)}..HEAD") if branch else ""
+        rows.append(Text.assemble(("\n  ", ""), (branch or "detached", f"bold {P}"),
+                                  (f"   {len(ahead.splitlines())} commit(s) ahead" if ahead else "", "bright_black")))
+        for l in ahead.splitlines()[:5]:
+            rows.append(Text("   " + l, style="bright_black", no_wrap=True, overflow="ellipsis"))
         stat = {}
         for l in git(cwd, "diff", "--numstat", "HEAD").splitlines():
             a, d, f = (l.split("\t", 2) + ["", ""])[:3]
@@ -405,8 +451,8 @@ def extra_view(view, cwd, orch_dir):
         for l in files[:30]:
             code, f = l[:2].strip(), l[3:]
             a, d = stat.get(f, ("", ""))
-            rows.append(Text.assemble((f"  {code:<2} ", "yellow"), (f, ""), (f"  +{a}" if a else "", "green"),
-                                      (f" -{d}" if d else "", "red"), no_wrap=True, overflow="ellipsis"))
+            rows.append(Text.assemble((f"  {code:<2} ", Y), (f, ""), (f"  +{a}" if a else "", G),
+                                      (f" -{d}" if d else "", R), no_wrap=True, overflow="ellipsis"))
         if files:
             rows.append(Text("\n  press d for the full diff", style="bright_black"))
     elif view == "activity":
@@ -455,7 +501,7 @@ def render(ps, width, chrome=True):
     head.add_column()
     head.add_column(justify="right")
     head.add_row(Text("\uf07c  " + (root.name if root else ps.cwd.name), style="bold"),
-                 Text(f" {branch} ", style="bold reverse magenta") if branch else Text(""))
+                 Text(f" {branch} ", style=f"bold {P}") if branch else Text(""))
     head.add_row(Text.assemble((f"{sym} ", col), (lead or "no AI", "bold"), (f"  lead · {lstat}", "bright_black")),
                  Text(time.strftime("%H:%M"), style="bright_black"))
     ps.head = head
@@ -465,7 +511,7 @@ def render(ps, width, chrome=True):
     other = "codex" if lead == "claude" else "claude"
     if ps.limited:
         rows.append(Panel(Text(f"{lead} hit its usage limit.\nPress s to continue in {other}.", style="bold"),
-                      border_style="red", padding=(0, 1)))
+                      border_style=Y, padding=(0, 1)))
     if not root:
         rows.append(Text("\n  not a git repository", style="bright_black"))
         return Group(*rows), []
@@ -487,7 +533,7 @@ def render(ps, width, chrome=True):
         rows.append(Text.assemble(("\n PLAN  ", "bold bright_black"), (st.get("title") or st["branch"], "bold")))
         bar = Table.grid(padding=(0, 1))
         bar.add_row(Text(" "), ProgressBar(total=max(len(tasks), 1), completed=done, width=max(10, width - 14),
-                                           complete_style="green", finished_style="green"),
+                                           complete_style=G, finished_style=G),
                     Text(f"{done}/{len(tasks)}", style="bold"))
         rows.append(bar)
         tt = Table.grid(padding=(0, 1), expand=True)
@@ -495,7 +541,7 @@ def render(ps, width, chrome=True):
         tt.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
         tt.add_column(no_wrap=True)
         for tid, t in tasks:
-            sym, col, label = STATUS.get(t["status"], ("⟳", "cyan", t["status"]))
+            sym, col, label = STATUS.get(t["status"], ("⟳", C, t["status"]))
             who = t.get("worker") or ""
             if t["status"] == "pending":
                 waits = [d for d in t["deps"] if st["tasks"][d]["status"] != "merged"]
@@ -507,11 +553,11 @@ def render(ps, width, chrome=True):
         gated = [k for k, t in tasks if t["status"] == "awaiting-approval"]
         questions = [(k, t) for k, t in tasks if t["status"] in ("needs-answer", "paused", "failed")]
         if gated:
-            rows.append(Panel(Text(f"{', '.join(gated)} waiting for your approval — press a"), border_style="magenta",
+            rows.append(Panel(Text(f"{', '.join(gated)} waiting for your approval — press a"), border_style=Y,
                               padding=(0, 1)))
             keys.append(("a", "approve"))
         for k, t in questions[:3]:
-            rows.append(Text(f" ? {k}: {t.get('reason') or t['status']}", style="yellow", overflow="ellipsis"))
+            rows.append(Text(f" ? {k}: {t.get('reason') or t['status']}", style=Y, overflow="ellipsis"))
         workers = [a for a in agents if a.get("pane_id") != (lp or {}).get("pane_id")]
         if workers:
             line = Text(" ")
@@ -546,7 +592,7 @@ def render(ps, width, chrome=True):
         rows.append(Text(f"\n CHANGES  {len(changes) or 'none'}", style="bold bright_black"))
         for l in changes[:8]:
             code, f = l[:2], l[3:]
-            col = "green" if "?" in code or "A" in code else "red" if "D" in code else "yellow"
+            col = G if "?" in code or "A" in code else R if "D" in code else Y
             rows.append(Text.assemble((f"  {code.strip():<2} ", col), (f, "")))
         if len(changes) > 8:
             rows.append(Text(f"  … {len(changes) - 8} more", style="bright_black"))
@@ -559,7 +605,7 @@ def render(ps, width, chrome=True):
         keys.append(("p", "ship"))
     keys.append(("?", "help"))
     if ps.message:
-        rows.append(Text("\n " + ps.message, style="cyan"))
+        rows.append(Text("\n " + ps.message, style=C))
     foot = Text(" ")
     for k, label in keys:
         foot.append(f" {k} ", style="reverse bold").append(f" {label}  ", style="bright_black")
@@ -652,8 +698,10 @@ def tui_base():
     return Base, Ask
 
 
-ACTIONS = [("switch", "\U000f04e1", "Switch"), ("run", "\uf04b", "Run"), ("approve", "\uf00c", "Approve"),
-           ("ship", "\uf135", "Ship"), ("diff", "\uf126", "Diff"), ("help", "\uf059", "Help")]
+ACTIONS = [("switch", "\U000f04e1", "s"), ("run", "\uf04b", "r"), ("approve", "\uf00c", "a"), ("ship", "\uf135", "p"),
+           ("diff", "\uf440", "d"), ("focus", "\uf065", "f"), ("help", "\uf059", "?")]
+TABS = [("task", "\uf0ae Task"), ("plan", "\uf0cb Plan"), ("changes", "\uf126 Git"), ("activity", "\uf21e Activity"),
+        ("agents", "\U000f06a9 Agents")]
 
 
 def panel_tui(args):
@@ -669,40 +717,37 @@ def panel_tui(args):
     class StatusPanel(Base):
         CSS = """
         Screen { background: ansi_default; }
-        #head { height: auto; border: round $accent; padding: 0 1; margin: 0 1; }
+        #head { height: auto; border: round #A78BFA 40%; padding: 0 1; margin: 0 1; }
+        Tab { padding: 0 1; }
         TabbedContent { height: 1fr; margin: 0 1; }
         #gatebar { height: auto; display: none; padding: 0 1; }
         #gatebar.on { display: block; }
-        #actions { layout: grid; grid-size: 6; height: 2; margin: 0 1; border-top: solid $accent 50%;
-                   border-title-align: left; border-title-color: $accent; }
-        #actions Button { width: 1fr; height: 1; min-width: 6; border: none; background: ansi_default;
-                          text-style: none; }
-        #actions Button:hover { background: $accent 25%; text-style: bold; }
+        #actions { layout: grid; grid-size: 7; height: 1; margin: 0 1; }
+        #actions Button { width: 1fr; height: 1; min-width: 4; border: none; background: ansi_default;
+                          color: ansi_bright_black; text-style: none; }
+        #actions Button:hover { color: #A78BFA; background: ansi_default; }
         #actions Button:focus { text-style: bold; }
-        #actions Button:disabled { opacity: 40%; }
-        #a-ship { color: ansi_bright_red; }
-        #a-approve { color: ansi_bright_green; }
+        #actions Button:disabled { opacity: 35%; }
         """
         BINDINGS = [Binding("s", "switch", "Switch AI"), Binding("r", "run", "Run plan"),
                     Binding("a", "approve", "Approve"), Binding("p", "ship", "Ship"), Binding("d", "diff", "Diff"),
-                    Binding("1", "tab('task')", "Task", show=False), Binding("2", "tab('changes')", "Changes", show=False),
-                    Binding("3", "tab('activity')", "Activity", show=False), Binding("question_mark", "help", "Help")]
+                    Binding("f", "focus", "Focus"), Binding("question_mark", "help", "Help"),
+                    *[Binding(str(i), f"tab('{t}')", show=False) for i, (t, _) in enumerate(TABS, 1)]]
         gated, keys, plan = [], [], False
 
         def compose(self):
             yield Static(id="head")
             with TabbedContent(initial="task"):
-                for tid, title in (("task", "\uf0ae Task"), ("changes", "\uf126 Changes"), ("activity", "\uf21e Activity")):
+                for tid, title in TABS:
                     with TabPane(title, id=tid):
                         with VerticalScroll():
                             yield Static(id=f"v-{tid}")
                             if tid == "task":
                                 with Horizontal(id="gatebar"):
                                     yield Button("⚑ Review & approve", id="gate", variant="warning")
-            with Grid(id="actions") as g:
-                g.border_title = "actions"
-                for aid, icon, label in ACTIONS:
-                    yield Button(f"{icon} {label}", id=f"a-{aid}")
+            with Grid(id="actions"):
+                for aid, icon, key in ACTIONS:
+                    yield Button(f"{icon} [dim]{key}[/]", id=f"a-{aid}", tooltip=aid)
 
         def on_mount(self):
             self.load()
@@ -712,20 +757,20 @@ def panel_tui(args):
         def load(self):
             body, keys = render(ps, max(self.size.width - 4, 30), chrome=False)
             od = (ps.root or ps.cwd) / ".orchestrate"
-            ch, act = Group(*extra_view("changes", ps.cwd, od)), Group(*extra_view("activity", ps.cwd, od))
+            views = {t: Group(*extra_view(t, ps.cwd, od)) for t, _ in TABS[1:]}
             st = plan_state(ps.root) if ps.root else None
             gated = [k for k, t in (st or {}).get("tasks", {}).items() if t["status"] == "awaiting-approval"]
-            self.call_from_thread(self.show, body, ch, act, keys, gated, bool(st))
+            self.call_from_thread(self.show, body, views, keys, gated, bool(st))
 
-        def show(self, body, ch, act, keys, gated, plan):
+        def show(self, body, views, keys, gated, plan):
             self.query_one("#head", Static).update(getattr(ps, "head", ""))
             n = len(git(ps.cwd, "status", "--short").splitlines()) if ps.root else 0
-            self.query_one(TabbedContent).get_tab("changes").label = f"\uf126 Changes {n}" if n else "\uf126 Changes"
+            self.query_one(TabbedContent).get_tab("changes").label = f"\uf126 Git {n}" if n else "\uf126 Git"
             for aid, need in (("run", "r"), ("approve", "a"), ("ship", "p")):
                 self.query_one(f"#a-{aid}", Button).disabled = need not in keys
             self.query_one("#v-task", Static).update(body)
-            self.query_one("#v-changes", Static).update(ch)
-            self.query_one("#v-activity", Static).update(act)
+            for t, v in views.items():
+                self.query_one(f"#v-{t}", Static).update(v)
             self.query_one("#gatebar").set_class(bool(gated), "on")
             if (keys, gated) != (self.keys, self.gated):
                 self.keys, self.gated, self.plan = keys, gated, plan
@@ -766,6 +811,9 @@ def panel_tui(args):
             self.push_screen(Ask(f"Switch {cur} → {other}?", body, [
                 ("go", "Switch", "primary"), ("quick", "Switch now, skip notes", "default"),
                 ("cancel", "Cancel", "default")]), done)
+
+        def action_focus(self):
+            self.cli("focus")
 
         def action_run(self):
             self.cli("run")
@@ -896,7 +944,7 @@ def home_screen(lead):
 
 
 COMMANDS = {"switch": switch, "run": run_plan, "approve": approve, "ship": ship,
-            "panel": panel if os.environ.get("AI_PLAIN") == "1" else lambda a: panel_tui(a)}
+            "focus": focus, "panel": panel if os.environ.get("AI_PLAIN") == "1" else lambda a: panel_tui(a)}
 
 if __name__ == "__main__":
     a = sys.argv[1:]
