@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --quiet --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["rich>=13"]
+# dependencies = ["rich>=13", "textual>=8"]
 # ///
 """ai — one entry point for the AI workspace (Herdr + Claude Code + Codex + orch).
 
@@ -197,7 +197,14 @@ def open_project(args):
             lead = "claude"
         else:
             query = a
-    path = pick_project(query)
+    if not query and sys.stdin.isatty() and os.environ.get("AI_PLAIN") != "1":
+        path, lead = home_screen(lead)
+    else:
+        path = pick_project(query)
+    open_path(path, lead)
+
+
+def open_path(path, lead):
     ensure_server()
     prepare_repo(path)
     remember(path)
@@ -248,7 +255,7 @@ def switch(args):
     if current and not quick:
         status = lp.get("agent_status")
         limited = bool(RATE_RE.search(pane_tail(lp["pane_id"])))
-        if status == "working" and not Confirm.ask(f"{current} is still working. Switch anyway?", default=False):
+        if status == "working" and "--yes" not in args and not Confirm.ask(f"{current} is still working. Switch anyway?", default=False):
             return
         if status in ("idle", "done") and not limited:
             with console.status(f"asking {current} to save its notes…"):
@@ -436,7 +443,7 @@ class PanelState:
         return lp, agents
 
 
-def render(ps, width):
+def render(ps, width, chrome=True):
     lp, agents = ps.snapshot()
     rows = []
     root = ps.root
@@ -450,7 +457,9 @@ def render(ps, width):
     head.add_row(Text(root.name if root else ps.cwd.name, style="bold"), Text(f" {branch}", style="magenta"))
     head.add_row(Text.assemble((f"{sym} ", col), (lead or "no AI", "bold"), (f"  lead · {lstat}", "bright_black")),
                  Text(time.strftime("%H:%M"), style="bright_black"))
-    rows.append(Panel(head, border_style="bright_black", padding=(0, 1)))
+    ps.header = Panel(head, border_style="bright_black", padding=(0, 1))
+    if chrome:
+        rows.append(ps.header)
     other = "codex" if lead == "claude" else "claude"
     if ps.limited:
         rows.append(Panel(Text(f"{lead} hit its usage limit.\nPress s to continue in {other}.", style="bold"),
@@ -465,7 +474,8 @@ def render(ps, width):
     tabs = Text(" ")
     for k, v in list(VIEWS.items())[:3]:
         tabs.append(f" {k} {v.title()} ", style="reverse bold" if v == ps.view else "bright_black")
-    rows.append(tabs)
+    if chrome:
+        rows.append(tabs)
     if ps.view != "task":
         rows += extra_view(ps.view, ps.cwd, orch_dir)
     elif st:
@@ -552,7 +562,7 @@ def render(ps, width):
     for k, label in keys:
         foot.append(f" {k} ", style="reverse bold").append(f" {label}  ", style="bright_black")
     rows += [Text(""), foot]
-    return Group(*rows), [k for k, _ in keys]
+    return Group(*(rows if chrome else rows[:-2])), [k for k, _ in keys]
 
 
 def panel(args):
@@ -597,7 +607,272 @@ def panel(args):
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
-COMMANDS = {"switch": switch, "run": run_plan, "approve": approve, "ship": ship, "panel": panel}
+# ------------------------------------------------------------------ Textual UI (panel + home)
+def tui_base():
+    from textual.app import App
+    from textual.containers import Horizontal, Vertical
+    from textual.screen import ModalScreen
+    from textual.widgets import Button, Input, Label, Static
+
+    class Ask(ModalScreen):
+        """Small centred dialog with buttons (and an optional text field). Dismisses with (button_id, text)."""
+        CSS = """
+        Ask { align: center middle; }
+        #box { width: 90%; max-width: 72; height: auto; border: round $accent; padding: 1 2; background: $panel; }
+        #btns { height: auto; margin-top: 1; align-horizontal: right; }
+        #btns Button { margin-left: 1; min-width: 10; }
+        """
+        BINDINGS = [("escape", "dismiss(None)", "Cancel")]
+
+        def __init__(self, title, body, buttons, field=None):
+            super().__init__()
+            self.t, self.b, self.btns, self.field = title, body, buttons, field
+
+        def compose(self):
+            with Vertical(id="box"):
+                yield Label(f"[b]{self.t}[/]")
+                yield Static(self.b)
+                if self.field:
+                    yield Input(placeholder=self.field, id="field")
+                with Horizontal(id="btns"):
+                    for bid, label, variant in self.btns:
+                        yield Button(label, id=bid, variant=variant)
+
+        def on_button_pressed(self, e):
+            text = self.query_one("#field", Input).value if self.field else ""
+            self.dismiss((e.button.id, text))
+
+    class Base(App):
+        def __init__(self):
+            super().__init__(ansi_color=True)
+            self.theme = "ansi-dark"
+
+    return Base, Ask
+
+
+def panel_tui(args):
+    from textual import work
+    from textual.binding import Binding
+    from textual.containers import Horizontal, VerticalScroll
+    from textual.widgets import Button, Footer, Static, TabbedContent, TabPane
+
+    Base, Ask = tui_base()
+    ps = PanelState()
+    me = os.path.abspath(sys.argv[0])
+
+    class StatusPanel(Base):
+        CSS = """
+        Screen { background: ansi_default; }
+        #head { height: auto; }
+        TabbedContent { height: 1fr; }
+        #gatebar { height: auto; display: none; padding: 0 1; }
+        #gatebar.on { display: block; }
+        """
+        BINDINGS = [Binding("s", "switch", "Switch AI"), Binding("r", "run", "Run plan"),
+                    Binding("a", "approve", "Approve"), Binding("p", "ship", "Ship"), Binding("d", "diff", "Diff"),
+                    Binding("1", "tab('task')", "Task", show=False), Binding("2", "tab('changes')", "Changes", show=False),
+                    Binding("3", "tab('activity')", "Activity", show=False), Binding("question_mark", "help", "Help")]
+        gated, keys, plan = [], [], False
+
+        def compose(self):
+            yield Static(id="head")
+            with TabbedContent(initial="task"):
+                for tid, title in (("task", "1 Task"), ("changes", "2 Changes"), ("activity", "3 Activity")):
+                    with TabPane(title, id=tid):
+                        with VerticalScroll():
+                            yield Static(id=f"v-{tid}")
+                            if tid == "task":
+                                with Horizontal(id="gatebar"):
+                                    yield Button("⚑ Review & approve", id="gate", variant="warning")
+            yield Footer()
+
+        def on_mount(self):
+            self.load()
+            self.set_interval(2, self.load)
+
+        @work(thread=True, exclusive=True)
+        def load(self):
+            body, keys = render(ps, max(self.size.width - 4, 30), chrome=False)
+            od = (ps.root or ps.cwd) / ".orchestrate"
+            ch, act = Group(*extra_view("changes", ps.cwd, od)), Group(*extra_view("activity", ps.cwd, od))
+            st = plan_state(ps.root) if ps.root else None
+            gated = [k for k, t in (st or {}).get("tasks", {}).items() if t["status"] == "awaiting-approval"]
+            self.call_from_thread(self.show, body, ch, act, keys, gated, bool(st))
+
+        def show(self, body, ch, act, keys, gated, plan):
+            self.query_one("#head", Static).update(getattr(ps, "header", ""))
+            self.query_one("#v-task", Static).update(body)
+            self.query_one("#v-changes", Static).update(ch)
+            self.query_one("#v-activity", Static).update(act)
+            self.query_one("#gatebar").set_class(bool(gated), "on")
+            if (keys, gated) != (self.keys, self.gated):
+                self.keys, self.gated, self.plan = keys, gated, plan
+                self.refresh_bindings()
+
+        def check_action(self, action, parameters):
+            need = {"run": "r", "approve": "a", "ship": "p"}.get(action)
+            return True if not need or need in self.keys else None
+
+        def action_tab(self, name):
+            self.query_one(TabbedContent).active = name
+
+        def on_button_pressed(self, e):
+            if e.button.id == "gate":
+                self.action_approve()
+
+        @work(thread=True)
+        def cli(self, *cmd, cwd=None):
+            r = sh([me, *cmd], cwd=cwd or ps.cwd)
+            out = [l for l in (r.stdout + r.stderr).splitlines() if l.strip()]
+            self.call_from_thread(self.notify, out[-1] if out else "done", severity="error" if r.returncode else "information")
+            self.call_from_thread(self.load)
+
+        def action_switch(self):
+            lp = lead_pane(workspace_panes(current_workspace() or "")) or {}
+            cur = lp.get("agent") or "lead"
+            other = "codex" if cur == "claude" else "claude"
+            busy = "\n\n[yellow]It is still working — its current step will be interrupted.[/]" if lp.get(
+                "agent_status") == "working" else ""
+            body = f"{cur} saves its notes, then {other} opens here and continues the task.{busy}"
+
+            def done(res):
+                if res and res[0] in ("go", "quick"):
+                    self.notify(f"switching to {other}…")
+                    self.cli("switch", other, "--yes", *(["--quick"] if res[0] == "quick" else []))
+            self.push_screen(Ask(f"Switch {cur} → {other}?", body, [
+                ("go", "Switch", "primary"), ("quick", "Switch now, skip notes", "default"),
+                ("cancel", "Cancel", "default")]), done)
+
+        def action_run(self):
+            self.cli("run")
+
+        def action_approve(self):
+            if not self.gated:
+                return
+            tid = self.gated[0]
+            t = plan_state(ps.root)["tasks"][tid]
+            rep = t.get("last_report")
+            report = Path(rep).read_text()[:1200] if rep and Path(rep).exists() else "(no report)"
+
+            def done(res):
+                if res and res[0] == "approve":
+                    sh(["orch", "approve", tid], cwd=ps.root)
+                    self.notify(f"{tid} approved")
+                elif res and res[0] == "reject":
+                    sh(["orch", "reject", tid, res[1] or "sent back from the panel"], cwd=ps.root)
+                    self.notify(f"{tid} sent back")
+                self.load()
+            self.push_screen(Ask(f"⚑ {tid}: {t['title']}", f"[dim]{t.get('dir')}[/]\n\n{report}", [
+                ("approve", "Approve", "success"), ("reject", "Send back", "error"), ("cancel", "Later", "default")],
+                field="if sending back: what should change?"), done)
+
+        def action_ship(self):
+            with self.suspend():
+                subprocess.call([me, "ship"], cwd=ps.cwd)
+                input("\npress enter to return")
+            self.load()
+
+        def action_diff(self):
+            with self.suspend():
+                subprocess.call("git -c color.ui=always diff HEAD | less -R", shell=True, cwd=ps.cwd)
+
+        def action_help(self):
+            self.push_screen(Ask("Keys", "\n".join(f"[b]{k:<8}[/] {w}" for k, w in HELP),
+                                 [("ok", "Close", "primary")]))
+
+    StatusPanel().run()
+
+
+def home_screen(lead):
+    from textual.binding import Binding
+    from textual.widgets import DataTable, Footer, Input, Static
+
+    Base, _ = tui_base()
+    repos = find_repos(config()["roots"])
+    rec = [p for p in recent_list() if p in repos]
+    wss = (herdr("workspace", "list") or {}).get("workspaces", [])
+    ws_by_name = {w["label"].split(" · ")[0]: w for w in wss}
+    agents = (herdr("agent", "list") or {}).get("agents", [])
+    opened = [p for p in dict.fromkeys(rec + repos) if Path(p).name in ws_by_name]
+    rows = []
+    for p in dict.fromkeys(opened + rec + repos):
+        name, info = Path(p).name, {"path": p, "ai": "", "state": "", "plan": "", "branch": ""}
+        if p in opened or p in rec:
+            sb = git(p, "status", "-sb").splitlines()
+            m = re.match(r"## ([^.\s]+)(?:\S*)?(?: \[ahead (\d+))?", sb[0] if sb else "")
+            info["branch"] = (m.group(1) + (f" ↑{m.group(2)}" if m.group(2) else "")) if m else ""
+        if p in opened:
+            w = ws_by_name[name]
+            kinds = [a.get("agent") for a in agents if str(a.get("pane_id", "")).startswith(w["workspace_id"] + ":")]
+            info["ai"] = next((k for k in kinds if k in HARNESSES), kinds[0] if kinds else "")
+            info["state"] = w.get("agent_status") or "idle"
+            st = plan_state(Path(p))
+            if st:
+                ts = [t for t in st["tasks"].values() if t["status"] != "skipped"]
+                info["plan"] = f"{sum(t['status'] == 'merged' for t in ts)}/{len(ts)} steps"
+        info["group"] = "open" if p in opened else "recent" if p in rec else ""
+        rows.append((name, info))
+    icon = {"working": "⟳", "blocked": "⚑", "done": "✔", "idle": "○"}
+    home = str(Path.home())
+
+    class Home(Base):
+        CSS = """
+        Screen { background: ansi_default; }
+        #title { padding: 0 1; height: auto; }
+        Input { margin: 0 1; border: round $accent; }
+        DataTable { height: 1fr; margin: 0 1; background: ansi_default; }
+        """
+        BINDINGS = [Binding("down", "move(1)", show=False, priority=True), Binding("up", "move(-1)", show=False, priority=True),
+                    Binding("enter", "open('')", "Open", priority=True),
+                    Binding("ctrl+o", "open('codex')", "Open with Codex", priority=True),
+                    Binding("escape", "quit", "Cancel")]
+
+        def compose(self):
+            yield Static("[b]ai workspace[/]  [dim]▶ open   ★ recent   type to search all projects[/]", id="title")
+            yield Input(placeholder="search projects…")
+            yield DataTable(cursor_type="row", show_header=True)
+            yield Footer()
+
+        def on_mount(self):
+            t = self.query_one(DataTable)
+            t.add_columns("", "Project", "AI", "Status", "Plan", "Branch", "Path")
+            self.fill("")
+
+        def fill(self, q):
+            t = self.query_one(DataTable)
+            t.clear()
+            ql = q.lower()
+            for name, i in rows:
+                if ql and not all(c in iter(name.lower()) for c in ql):
+                    continue
+                if not ql and not i["group"] and any(r[1]["group"] for r in rows):
+                    continue
+                mark = "▶" if i["group"] == "open" else "★" if i["group"] == "recent" else " "
+                state = f"{icon.get(i['state'], '○')} {i['state']}" if i["state"] else ""
+                t.add_row(mark, Text(name, style="bold"), i["ai"], state, i["plan"], Text(i["branch"], style="magenta"),
+                          Text(i["path"].replace(home, "~"), style="dim"), key=i["path"])
+
+        def on_input_changed(self, e):
+            self.fill(e.value)
+
+        def action_move(self, d):
+            t = self.query_one(DataTable)
+            t.move_cursor(row=t.cursor_row + d)
+
+        def action_open(self, harness):
+            t = self.query_one(DataTable)
+            if t.row_count:
+                key = t.coordinate_to_cell_key((t.cursor_row, 0)).row_key.value
+                self.exit((Path(key), harness or lead))
+
+    res = Home().run()
+    if not res:
+        sys.exit(0)
+    return res
+
+
+COMMANDS = {"switch": switch, "run": run_plan, "approve": approve, "ship": ship,
+            "panel": panel if os.environ.get("AI_PLAIN") == "1" else lambda a: panel_tui(a)}
 
 if __name__ == "__main__":
     a = sys.argv[1:]
