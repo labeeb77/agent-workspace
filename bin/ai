@@ -652,7 +652,7 @@ def tui_base():
     return Base, Ask
 
 
-ACTIONS = [("switch", "\U000f04e1", "Switch AI"), ("run", "\uf04b", "Run plan"), ("approve", "\uf00c", "Approve"),
+ACTIONS = [("switch", "\U000f04e1", "Switch"), ("run", "\uf04b", "Run"), ("approve", "\uf00c", "Approve"),
            ("ship", "\uf135", "Ship"), ("diff", "\uf126", "Diff"), ("help", "\uf059", "Help")]
 
 
