@@ -42,7 +42,7 @@ progress, and switching AIs keeps the task's context.
 - **Switching** saves the notes and git state to `.orchestrate/handoff.md`, then opens the other AI
   in the lead's place with "read it and continue".
 - **Skills** live in `~/.agents/skills` (Codex reads that folder; each skill is symlinked into
-  `~/.claude/skills`): `orch-plan`, `orch-run`, `handoff`, plus the `role-*` specialists for React/Next,
+  `~/.claude/skills`): `orch-plan`, `orch-run`, `handoff`, plus the `role-*` specialists for React/Next, Python, Flutter,
   .NET/EF, Node, SQL, code review and security review.
 
 ## Install / update
