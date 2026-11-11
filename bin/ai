@@ -733,14 +733,14 @@ def panel_tui(args):
 
     class StatusPanel(Base):
         CSS = """
-        Screen { background: ansi_default; }
+        Screen { background: ansi_default; overflow-x: hidden; }
         #head { height: auto; border: round #A78BFA 40%; padding: 0 1; margin: 0 1; }
         Tab { padding: 0 1; }
         TabbedContent { height: 1fr; margin: 0 1; }
         #gatebar { height: auto; display: none; padding: 0 1; }
         #gatebar.on { display: block; }
-        #actions { layout: grid; grid-size: 8; height: 1; margin: 0 1; }
-        #actions Button { width: 1fr; height: 1; min-width: 4; border: none; background: ansi_default;
+        #actions { layout: grid; grid-size: 8; height: 1; margin: 0 1; min-width: 40; }
+        #actions Button { width: 1fr; height: 1; min-width: 5; padding: 0; border: none; background: ansi_default;
                           color: ansi_bright_black; text-style: none; }
         #actions Button:hover { color: #A78BFA; background: ansi_default; }
         #actions Button:focus { text-style: bold; }
