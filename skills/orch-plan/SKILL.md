@@ -16,7 +16,7 @@ Feature request = the user's message that invoked this skill.
 
 ## 2. Discover the team
 - Run `herdr agent list` and `herdr pane current`. The current pane is YOU. Never prompt it.
-- **Coders** = every claude and codex pane that is not you. Also count opencode, amp or gemini panes that are not you, if the user wants them coding. Name them `claude-1`, `claude-2`, `codex-1`… with `herdr agent rename` and always target them by name. Names stay stable; pane IDs can change when panes close.
+- **Coders** = every claude and codex pane in YOUR workspace (same `w<N>:` prefix as `herdr pane current`) that is not you — never the leads of other projects. Also count opencode, amp or gemini panes that are not you, if the user wants them coding. Name them `claude-1`, `claude-2`, `codex-1`… with `herdr agent rename` and always target them by name. Names stay stable; pane IDs can change when panes close.
 - **Reviewer** = AGY, or one spare agent the user picks. Name it `reviewer`. If there is none, use `Reviewer: none`.
 - If it's unclear which pane should play which role, ask the user.
 
