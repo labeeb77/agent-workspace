@@ -28,6 +28,7 @@ progress, and switching AIs keeps the task's context.
 | Run an approved plan | the lead runs `ai run`, or press **r** in the panel |
 | Approve a step waiting for you | **a** in the panel |
 | Switch Claude ⇄ Codex | **s** in the panel, or **prefix+alt+s** (`ai switch --quick` if it's rate-limited) |
+| Run your own commands | **t** in the panel or **prefix+t**: a shell under the AI; again to jump back |
 | Give the AI the full screen | **f** in the panel or **prefix+f** (again to restore); **prefix+b** hides the sidebar |
 | Finish (commit, push, PR) | **p** in the panel (`ai ship`). It always asks before pushing. |
 

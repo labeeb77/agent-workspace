@@ -243,6 +243,22 @@ def focus(args):
     herdr("pane", "zoom", "--pane", lp["pane_id"], "--toggle")
 
 
+def term(args):
+    """Open a shell under the lead (first time), then jump between it and the lead."""
+    panes = workspace_panes(current_workspace() or "")
+    lp = lead_pane(panes) or die("no lead pane in this workspace")
+    t = next((p for p in panes if p.get("label") == "term"), None)
+    if not t:
+        new = herdr("pane", "split", lp["pane_id"], "--direction", "down", "--ratio", "0.72",
+                    "--cwd", lp.get("cwd") or str(Path.cwd())) or die("herdr could not split the lead pane")
+        herdr("pane", "rename", new["pane"]["pane_id"], "term")
+        herdr("pane", "focus", "--pane", lp["pane_id"], "--direction", "down")
+    elif t.get("focused"):
+        herdr("pane", "focus", "--pane", t["pane_id"], "--direction", "up")
+    else:
+        herdr("pane", "focus", "--pane", lp["pane_id"], "--direction", "down")
+
+
 # ------------------------------------------------------------------ ai switch
 def switch(args):
     quick = "--quick" in args
@@ -396,6 +412,7 @@ AGENT = {"working": ("●", C), "blocked": ("●", Y), "idle": ("○", "bright_b
 VIEWS = {"1": "task", "2": "changes", "3": "activity", "?": "help"}
 HELP = [("s", "switch Claude ⇄ Codex"), ("r", "run the approved plan"), ("a", "approve a waiting step"),
         ("p", "ship: commit, push, PR"), ("d", "full diff (q to close)"), ("1-5", "task / plan / git / activity / agents"),
+        ("t", "terminal under the AI (again to jump back)"),
         ("f", "focus mode: lead full screen (again to restore)"),
         ("?", "this help"), ("^␣ a", "open or jump to a project"), ("alt ↑↓", "previous / next project"),
         ("^␣ b", "hide / show the sidebar")]
@@ -699,7 +716,7 @@ def tui_base():
 
 
 ACTIONS = [("switch", "\U000f04e1", "s"), ("run", "\uf04b", "r"), ("approve", "\uf00c", "a"), ("ship", "\uf135", "p"),
-           ("diff", "\uf440", "d"), ("focus", "\uf065", "f"), ("help", "\uf059", "?")]
+           ("diff", "\uf440", "d"), ("focus", "\uf065", "f"), ("term", "\uf120", "t"), ("help", "\uf059", "?")]
 TABS = [("task", "\uf0ae Task"), ("plan", "\uf0cb Plan"), ("changes", "\uf126 Git"), ("activity", "\uf21e Activity"),
         ("agents", "\U000f06a9 Agents")]
 
@@ -722,7 +739,7 @@ def panel_tui(args):
         TabbedContent { height: 1fr; margin: 0 1; }
         #gatebar { height: auto; display: none; padding: 0 1; }
         #gatebar.on { display: block; }
-        #actions { layout: grid; grid-size: 7; height: 1; margin: 0 1; }
+        #actions { layout: grid; grid-size: 8; height: 1; margin: 0 1; }
         #actions Button { width: 1fr; height: 1; min-width: 4; border: none; background: ansi_default;
                           color: ansi_bright_black; text-style: none; }
         #actions Button:hover { color: #A78BFA; background: ansi_default; }
@@ -731,7 +748,7 @@ def panel_tui(args):
         """
         BINDINGS = [Binding("s", "switch", "Switch AI"), Binding("r", "run", "Run plan"),
                     Binding("a", "approve", "Approve"), Binding("p", "ship", "Ship"), Binding("d", "diff", "Diff"),
-                    Binding("f", "focus", "Focus"), Binding("question_mark", "help", "Help"),
+                    Binding("f", "focus", "Focus"), Binding("t", "term", "Terminal"), Binding("question_mark", "help", "Help"),
                     *[Binding(str(i), f"tab('{t}')", show=False) for i, (t, _) in enumerate(TABS, 1)]]
         gated, keys, plan = [], [], False
 
@@ -811,6 +828,9 @@ def panel_tui(args):
             self.push_screen(Ask(f"Switch {cur} → {other}?", body, [
                 ("go", "Switch", "primary"), ("quick", "Switch now, skip notes", "default"),
                 ("cancel", "Cancel", "default")]), done)
+
+        def action_term(self):
+            self.cli("term")
 
         def action_focus(self):
             self.cli("focus")
@@ -944,7 +964,7 @@ def home_screen(lead):
 
 
 COMMANDS = {"switch": switch, "run": run_plan, "approve": approve, "ship": ship,
-            "focus": focus, "panel": panel if os.environ.get("AI_PLAIN") == "1" else lambda a: panel_tui(a)}
+            "focus": focus, "term": term, "panel": panel if os.environ.get("AI_PLAIN") == "1" else lambda a: panel_tui(a)}
 
 if __name__ == "__main__":
     a = sys.argv[1:]
