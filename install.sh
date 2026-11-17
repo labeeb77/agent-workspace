@@ -4,6 +4,16 @@
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 
+# --herdr-config: also install herdr/config.toml (your current one is backed up first)
+herdr_config=0
+for a in "$@"; do
+  case $a in
+    --herdr-config) herdr_config=1 ;;
+    -h|--help) echo "usage: install.sh [--herdr-config]"; exit 0 ;;
+    *) echo "unknown option: $a" >&2; exit 2 ;;
+  esac
+done
+
 link() {  # link <target> <link-path>
   local target=$1 path=$2
   if [[ -L $path && $(readlink -f "$path") == "$(readlink -f "$target")" ]]; then echo "ok     $path"; return; fi
@@ -28,12 +38,28 @@ for d in "$here"/skills/*/; do
 done
 "$here/bin/skills-link"   # ... and expose all of them to Claude Code
 
-# 3. herdr shortcuts: prefix+a opens a project, prefix+alt+s switches the lead AI, prefix+f focus mode, prefix+t terminal
+# 3a. the full herdr setup (theme, tmux-style keys, top bar): new installs get it; an existing,
+#     different config is only replaced with --herdr-config, after a timestamped backup
 herdr_cfg=$HOME/.config/herdr/config.toml
+if [[ ! -e $herdr_cfg ]]; then
+  mkdir -p "$(dirname "$herdr_cfg")"
+  cp "$here/herdr/config.toml" "$herdr_cfg" && echo "copied $herdr_cfg"
+elif cmp -s "$here/herdr/config.toml" "$herdr_cfg"; then
+  echo "ok     $herdr_cfg"
+elif (( herdr_config )); then
+  bak=$herdr_cfg.bak-$(date +%Y%m%d-%H%M%S)
+  cp "$herdr_cfg" "$bak" && cp "$here/herdr/config.toml" "$herdr_cfg"
+  echo "replaced $herdr_cfg (backup: $bak)"
+  herdr server reload-config >/dev/null 2>&1 || true
+else
+  echo "keep   $herdr_cfg differs from herdr/config.toml; run with --herdr-config to replace it (backed up)"
+fi
+
+# 3b. herdr shortcuts: prefix+a opens a project, prefix+alt+s switches the lead AI, prefix+f focus mode, prefix+t terminal
 if [[ -f $herdr_cfg ]] && ! grep -q '# >>> ai workspace >>>' "$herdr_cfg"; then
   cat >> "$herdr_cfg" <<'EOF'
 
-# >>> ai workspace >>> (managed by ~/dev/tools/agent-workspace/install.sh)
+# >>> ai workspace >>> (managed by agent-workspace/install.sh)
 [[keys.command]]
 key = "prefix+a"
 type = "popup"
