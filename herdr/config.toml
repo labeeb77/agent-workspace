@@ -126,4 +126,14 @@ command = "ai focus"
 key = "prefix+t"
 type = "shell"
 command = "ai term"
+
+[[keys.command]]
+key = "prefix+y"
+type = "shell"
+command = "ai status"
+
+[[keys.command]]
+key = "prefix+i"
+type = "shell"
+command = "ai edit"
 # <<< ai workspace <<<

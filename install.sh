@@ -55,7 +55,7 @@ else
   echo "keep   $herdr_cfg differs from herdr/config.toml; run with --herdr-config to replace it (backed up)"
 fi
 
-# 3b. herdr shortcuts: prefix+a opens a project, prefix+alt+s switches the lead AI, prefix+f focus mode, prefix+t terminal
+# 3b. herdr shortcuts: prefix+a opens a project, prefix+alt+s switches the lead AI, prefix+f focus mode, prefix+t terminal, prefix+y status panel, prefix+i editor
 if [[ -f $herdr_cfg ]] && ! grep -q '# >>> ai workspace >>>' "$herdr_cfg"; then
   cat >> "$herdr_cfg" <<'EOF'
 
@@ -83,6 +83,16 @@ command = "ai focus"
 key = "prefix+t"
 type = "shell"
 command = "ai term"
+
+[[keys.command]]
+key = "prefix+y"
+type = "shell"
+command = "ai status"
+
+[[keys.command]]
+key = "prefix+i"
+type = "shell"
+command = "ai edit"
 # <<< ai workspace <<<
 EOF
   echo "added herdr shortcuts (prefix+a, prefix+alt+s)"

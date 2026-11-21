@@ -75,7 +75,7 @@ Keys (prefix = `ctrl+space`):
 | `prefix+shift+c`, `alt+up/down` | new workspace, previous/next workspace |
 | `prefix+[` | copy mode |
 | `prefix+q`, `prefix+?`, `prefix+d` | reload config, help, detach |
-| `prefix+a`, `prefix+alt+s`, `prefix+f`, `prefix+t` | `ai` open project, switch AI, focus mode, terminal |
+| `prefix+a`, `prefix+alt+s`, `prefix+f`, `prefix+t`, `prefix+y`, `prefix+i` | `ai` open project, switch AI, focus mode, terminal, reopen status panel, open in Zed |
 
 ## Everyday use
 

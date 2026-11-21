@@ -259,6 +259,36 @@ def term(args):
         herdr("pane", "focus", "--pane", lp["pane_id"], "--direction", "down")
 
 
+def status(args):
+    """Reopen the status panel beside the lead if it was closed, or restart it in an idle pane."""
+    panes = workspace_panes(current_workspace() or "")
+    lp = lead_pane(panes) or die("no lead pane in this workspace")
+    sp = next((p for p in panes if p.get("label") == "status"), None)
+    if sp:
+        # After a Herdr restart the pane comes back as a bare shell; only start the panel then,
+        # so a running panel never gets "ai panel" typed into it.
+        info = (herdr("pane", "process-info", "--pane", sp["pane_id"]) or {}).get("process_info", {})
+        if info and info.get("foreground_process_group_id") == info.get("shell_pid"):
+            herdr("pane", "run", sp["pane_id"], "ai panel")
+        return
+    cwd = lp.get("cwd") or str(Path.cwd())
+    new = herdr("pane", "split", lp["pane_id"], "--direction", "right", "--ratio", "0.74", "--cwd", cwd,
+                "--no-focus") or die("herdr could not split the lead pane")
+    herdr("pane", "rename", new["pane"]["pane_id"], "status")
+    herdr("pane", "run", new["pane"]["pane_id"], "ai panel")
+
+
+def edit(args):
+    """Open the workspace's project in the editor (Zed by default, $AI_EDITOR to change)."""
+    panes = workspace_panes(current_workspace() or "")
+    lp = lead_pane(panes) or die("no lead pane in this workspace")
+    cwd = lp.get("foreground_cwd") or lp.get("cwd") or str(Path.cwd())
+    editor = os.environ.get("AI_EDITOR", "zed")
+    shutil.which(editor) or die(f"{editor} is not installed")
+    subprocess.Popen([editor, repo_root(cwd) or cwd], start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 # ------------------------------------------------------------------ ai switch
 def switch(args):
     quick = "--quick" in args
@@ -964,7 +994,7 @@ def home_screen(lead):
 
 
 COMMANDS = {"switch": switch, "run": run_plan, "approve": approve, "ship": ship,
-            "focus": focus, "term": term, "panel": panel if os.environ.get("AI_PLAIN") == "1" else lambda a: panel_tui(a)}
+            "focus": focus, "term": term, "status": status, "edit": edit, "panel": panel if os.environ.get("AI_PLAIN") == "1" else lambda a: panel_tui(a)}
 
 if __name__ == "__main__":
     a = sys.argv[1:]
